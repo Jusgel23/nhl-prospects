@@ -67,11 +67,14 @@ class ComparableIndex:
             logger.info(f"Comparables index built for {pos}: {len(sub)} players.")
 
     def find_comparables(self, prospect_row: pd.Series,
-                          n: int = 5) -> pd.DataFrame:
+                          n: int = 5,
+                          same_draft_year_only: bool = False) -> pd.DataFrame:
         """
         Return top-n comparables for a single prospect.
+        If same_draft_year_only=True, restrict to historical prospects drafted
+        in the same year (used for the "DY Comps" list in the frontend).
         Returns DataFrame with columns: name, draft_year, similarity_score,
-        nhler_probability (from outcomes), nhl_outcome_label, nhl_gp, nhl_points.
+        nhl_gp, nhl_points, is_nhler, is_star, outcome_label.
         """
         pos = "F" if prospect_row.get("is_forward", 1) == 1 else "D"
         if pos not in self._models:
@@ -80,13 +83,18 @@ class ComparableIndex:
 
         nn, scaler, hist_df = self._models[pos]
 
+        # Need a wider candidate pool when filtering by draft year,
+        # since most neighbors will be dropped.
+        k = min(len(hist_df), (n + 1) * 20 if same_draft_year_only else n + 1)
+
         x = _extract_sim_features(prospect_row.to_frame().T)
         x_scaled = scaler.transform(x)
 
-        dists, indices = nn.kneighbors(x_scaled, n_neighbors=min(n + 1, len(hist_df)))
+        dists, indices = nn.kneighbors(x_scaled, n_neighbors=k)
         dists = dists[0]
         indices = indices[0]
 
+        target_dy = prospect_row.get("draft_year")
         rows = []
         for dist, idx in zip(dists, indices):
             comp = hist_df.iloc[idx]
@@ -94,6 +102,10 @@ class ComparableIndex:
             # Skip if same player (e.g. prospect is in historical set)
             if comp.get("player_id") == prospect_row.get("player_id"):
                 continue
+
+            if same_draft_year_only and pd.notna(target_dy):
+                if comp.get("draft_year") != target_dy:
+                    continue
 
             sim_score = _dist_to_similarity(dist)
             is_nhler = bool(comp.get("is_nhler", 0))

@@ -10,5 +10,6 @@ eliteprospect-scraper>=0.1.0
 matplotlib>=3.7.0
 plotly>=5.18.0
 rich>=13.7.0
+streamlit>=1.30.0
 python-dotenv>=1.0.0
 joblib>=1.3.0
