@@ -517,6 +517,14 @@ def main():
     positions = sorted(p for p in players["position"].dropna().unique() if p)
     pos_filter = st.sidebar.multiselect("Position", positions, default=[])
 
+    leagues = sorted(
+        l for l in seasons["league"].dropna().unique() if l
+    ) if not seasons.empty else []
+    league_filter = st.sidebar.multiselect(
+        "League", leagues, default=[],
+        help="Only show prospects who played in the selected league(s).",
+    )
+
     # Apply filters to pick list
     pick_df = players.copy()
     if pos_filter:
@@ -524,6 +532,9 @@ def main():
     if year_filter != "All" and not outcomes.empty:
         ids_in_year = outcomes[outcomes["draft_year"] == int(year_filter)]["player_id"]
         pick_df = pick_df[pick_df["player_id"].isin(ids_in_year)]
+    if league_filter:
+        ids_in_league = seasons[seasons["league"].isin(league_filter)]["player_id"].unique()
+        pick_df = pick_df[pick_df["player_id"].isin(ids_in_league)]
 
     pick_df = pick_df.sort_values("name")
     name_to_id = dict(zip(pick_df["name"], pick_df["player_id"]))

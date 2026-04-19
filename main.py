@@ -49,26 +49,37 @@ RANKINGS_CSV = Path("data/processed/rankings.csv")
 
 def cmd_collect(args):
     seasons = args.seasons or DEFAULT_SEASONS
+    league_filter = (getattr(args, "league", None) or "").upper().strip() or None
+
     console.rule("[bold green]Collecting prospect data")
+    if league_filter:
+        console.print(f"[yellow]League filter:[/] {league_filter} only")
 
     init_db()
 
-    # CHL via EliteProspects
-    console.print(f"Scraping CHL data for seasons: {seasons}")
-    players_df, seasons_df = scrape_draft_class(seasons)
-    if not players_df.empty:
-        upsert_players(players_df)
-        console.print(f"  [green]✓[/] {len(players_df)} players stored")
-    if not seasons_df.empty:
-        upsert_seasons(seasons_df)
-        console.print(f"  [green]✓[/] {len(seasons_df)} season rows stored")
+    # CHL via EliteProspects — skip entirely if filtering to a non-CHL league
+    CHL_LEAGUES = {"OHL", "WHL", "QMJHL", "CHL"}
+    if league_filter is None or league_filter in CHL_LEAGUES:
+        console.print(f"Scraping CHL data for seasons: {seasons}")
+        players_df, seasons_df = scrape_draft_class(seasons)
+        if league_filter and league_filter != "CHL":
+            seasons_df = seasons_df[seasons_df["league"].str.upper() == league_filter]
+            keep_ids = set(seasons_df["player_id"])
+            players_df = players_df[players_df["player_id"].isin(keep_ids)]
+        if not players_df.empty:
+            upsert_players(players_df)
+            console.print(f"  [green]✓[/] {len(players_df)} players stored")
+        if not seasons_df.empty:
+            upsert_seasons(seasons_df)
+            console.print(f"  [green]✓[/] {len(seasons_df)} season rows stored")
 
-    # NCAA via USCHO
-    console.print("Scraping NCAA data from USCHO...")
-    ncaa_df = scrape_ncaa_multiple_seasons(seasons)
-    if not ncaa_df.empty:
-        upsert_seasons(ncaa_df)
-        console.print(f"  [green]✓[/] {len(ncaa_df)} NCAA season rows stored")
+    # NCAA via USCHO — skip if filtering to a non-NCAA league
+    if league_filter is None or league_filter == "NCAA":
+        console.print("Scraping NCAA data from USCHO...")
+        ncaa_df = scrape_ncaa_multiple_seasons(seasons)
+        if not ncaa_df.empty:
+            upsert_seasons(ncaa_df)
+            console.print(f"  [green]✓[/] {len(ncaa_df)} NCAA season rows stored")
 
     # Historical outcomes — scraped from Hockey Reference, cached locally
     console.print("Fetching historical draft outcomes (1995-2019) from Hockey Reference...")
@@ -139,6 +150,7 @@ def cmd_train(args):
 
 def cmd_rank(args):
     console.rule("[bold yellow]Generating prospect rankings")
+    league_filter = (getattr(args, "league", None) or "").upper().strip() or None
 
     players_df  = load_players()
     seasons_df  = load_seasons()
@@ -153,6 +165,20 @@ def cmd_rank(args):
         players_df, seasons_df, outcomes_df if not outcomes_df.empty else None,
         draft_year=draft_year,
     )
+
+    # Narrow to prospects with at least one season in the target league
+    if league_filter:
+        lg_players = seasons_df[
+            seasons_df["league"].str.upper() == league_filter
+        ]["player_id"].unique()
+        before = len(features_df)
+        features_df = features_df[features_df["player_id"].isin(lg_players)]
+        console.print(
+            f"[yellow]League filter:[/] {league_filter} → {len(features_df)} of {before} prospects retained."
+        )
+        if features_df.empty:
+            console.print(f"[red]No prospects found with {league_filter} seasons.[/]")
+            return
 
     predictor = ProspectPredictor()
     predictions_df = predictor.predict(features_df)
@@ -247,6 +273,8 @@ def main():
     p_collect = sub.add_parser("collect", help="Scrape CHL/NCAA data")
     p_collect.add_argument("--seasons", nargs="+", default=None,
                             help="Seasons to scrape e.g. 2023-2024 2024-2025")
+    p_collect.add_argument("--league", type=str, default=None,
+                            help="Restrict scrape to a single league (e.g. OHL, WHL, QMJHL, NCAA)")
 
     # process
     sub.add_parser("process", help="Normalize data, compute NHLe")
@@ -258,6 +286,8 @@ def main():
     p_rank = sub.add_parser("rank", help="Generate prospect rankings")
     p_rank.add_argument("--draft-year", type=int, default=None)
     p_rank.add_argument("--top", type=int, default=50)
+    p_rank.add_argument("--league", type=str, default=None,
+                        help="Restrict rankings to prospects with seasons in this league")
 
     # report
     p_report = sub.add_parser("report", help="Generate per-player scouting report")
@@ -268,6 +298,8 @@ def main():
     p_pipeline.add_argument("--seasons", nargs="+", default=None)
     p_pipeline.add_argument("--draft-year", type=int, default=None)
     p_pipeline.add_argument("--top", type=int, default=50)
+    p_pipeline.add_argument("--league", type=str, default=None,
+                            help="Restrict the pipeline to a single league (e.g. OHL)")
 
     args = parser.parse_args()
     dispatch = {

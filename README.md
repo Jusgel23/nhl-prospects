@@ -104,6 +104,20 @@ python main.py rank --draft-year 2025 --top 50         # generate rankings CSV
 python main.py report --player "Connor Bedard"         # per-player markdown report
 ```
 
+### Narrow to a single league (e.g. OHL) for validation
+
+Use `--league` on `collect`, `rank`, or `pipeline` to restrict the run to one
+league. Helpful for sanity-checking the full pipeline end-to-end before
+expanding scrapes:
+
+```bash
+python main.py pipeline --league OHL --seasons 2023-2024 2024-2025
+python main.py rank --league OHL --top 25
+```
+
+The Streamlit sidebar also has a **League** multi-select that filters the
+player picker.
+
 Outputs land in `data/processed/rankings.csv` and `data/reports/*.md`.
 
 ### Launch the Streamlit frontend
