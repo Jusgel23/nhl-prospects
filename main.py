@@ -70,8 +70,9 @@ def cmd_collect(args):
         upsert_seasons(ncaa_df)
         console.print(f"  [green]✓[/] {len(ncaa_df)} NCAA season rows stored")
 
-    # Historical outcomes from Kaggle CSV
-    console.print("Loading historical draft outcomes...")
+    # Historical outcomes — scraped from Hockey Reference, cached locally
+    console.print("Fetching historical draft outcomes (1995-2019) from Hockey Reference...")
+    console.print("  [dim](~3 min first run, cached after that)[/]")
     outcomes_df = load_draft_outcomes()
     if not outcomes_df.empty:
         upsert_outcomes(outcomes_df)
@@ -114,9 +115,14 @@ def cmd_train(args):
     outcomes_df = load_outcomes()
 
     if outcomes_df.empty:
-        console.print("[red]No historical outcomes. Download the Kaggle CSV to data/historical/.[/]")
-        console.print("  See: https://www.kaggle.com/datasets/mattop/nhl-draft-hockey-player-data-1963-2022")
-        return
+        console.print("[yellow]No cached outcomes — will scrape Hockey Reference (1995-2019). This takes ~3 min...[/]")
+        from src.data.loaders.historical import load_draft_outcomes
+        outcomes_df = load_draft_outcomes()
+        if outcomes_df.empty:
+            console.print("[red]Could not retrieve historical outcomes. Check your internet connection.[/]")
+            return
+        from src.data.database import upsert_outcomes
+        upsert_outcomes(outcomes_df)
 
     features_df = build_feature_matrix(players_df, seasons_df, outcomes_df)
     labeled = features_df[features_df["is_nhler"].notna()]
