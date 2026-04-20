@@ -42,7 +42,7 @@ from src.data.scrapers.nhl_api import (
     enrich_player as nhl_enrich_player, load_id_map as nhl_load_id_map,
     save_id_map as nhl_save_id_map,
 )
-from src.models.nhle import apply_nhle_to_seasons, build_development_arc
+from src.models.nhle import apply_nhle_to_seasons, build_development_arc, is_excluded_league
 from src.models.features import build_feature_matrix
 from src.models.predictor import ProspectPredictor
 from src.comparables.similarity import build_comparable_index
@@ -352,14 +352,16 @@ def cmd_backfill_careers(args):
         }
         upsert_players(pd.DataFrame([bio_row]))
 
-        # Upsert seasons
+        # Upsert seasons (dropping Tier-4 youth/prep rows at ingest — they
+        # have no predictive value and would pollute feature aggregation).
         seasons = career.get("seasons", [])
         if seasons:
             s_df = pd.DataFrame(seasons)
             s_df["player_id"] = syn_id
-            # Keep only columns that exist in the seasons schema; defensive
-            # upsert will drop any extras anyway.
-            upsert_seasons(s_df)
+            if "league" in s_df.columns:
+                s_df = s_df[~s_df["league"].apply(is_excluded_league)].copy()
+            if not s_df.empty:
+                upsert_seasons(s_df)
 
         scraped += 1
         if i % 50 == 0 or i == len(hr_ids):
@@ -406,7 +408,12 @@ def cmd_enrich_nhl_bios(args):
             hits += 1
             upsert_players(pd.DataFrame([result["bio"]]))
             if result["seasons"]:
-                upsert_seasons(pd.DataFrame(result["seasons"]))
+                s_df = pd.DataFrame(result["seasons"])
+                # Drop Tier-4 youth/prep rows (WSI, USHS, CSSHL, U10-U17, etc.)
+                if "league" in s_df.columns:
+                    s_df = s_df[~s_df["league"].apply(is_excluded_league)].copy()
+                if not s_df.empty:
+                    upsert_seasons(s_df)
 
         if i % 25 == 0 or i == len(target):
             console.print(f"  {i}/{len(target)} processed "

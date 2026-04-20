@@ -13,8 +13,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Conversion factors from established research (TopDownHockey / Vollman)
+# Conversion factors from established research (TopDownHockey / Vollman),
+# extended with additional leagues observed in HR + NHL-API career data.
 NHLE_FACTORS: dict[str, float] = {
+    # Core leagues
     "NHL":   1.00,
     "AHL":   0.44,
     "OHL":   0.30,
@@ -28,7 +30,69 @@ NHLE_FACTORS: dict[str, float] = {
     "LIIGA": 0.66,
     "NLA":   0.60,
     "DEL":   0.57,
+
+    # Junior A / Tier-2 feeder leagues
+    "BCHL":  0.22,   # British Columbia Hockey League
+    "OJHL":  0.20,   # Ontario Junior Hockey League
+    "AJHL":  0.20,   # Alberta Junior Hockey League
+    "NTDP":  0.25,   # USA Hockey National Team Development Program
+    "MHL":   0.22,   # Russian U20 junior (top junior level in Russia)
+
+    # Russian / European secondary pro
+    "VHL":   0.55,   # Russian Tier-2 pro (one step below KHL)
+    "RUSSIA": 0.40,  # Generic Russian senior amateur/semi-pro
+    "IHL":   0.30,   # Historical International Hockey League (defunct US minor)
+
+    # International tournaments (short-sample events — assigned a factor
+    # but contribute modestly to aggregates because games-played is small)
+    "WJC-20":               0.50,  # World Juniors (U20)
+    "WJC-18":               0.40,  # U18 Worlds
+    "WHC-17":               0.30,  # U17 Worlds
+    "HLINKA GRETZKY CUP":   0.35,  # U18 August tournament
+    "IVAN HLINKA MEMORIAL": 0.35,  # Same event, older name
+    "WC":                   0.75,  # Senior Men's World Championship
+    "WC-A":                 0.55,  # Worlds Division I-A
+    "WJC-A":                0.25,  # World Jr A Challenge (Tier 2 nations)
+    "WJAC-19":              0.25,  # Variant spelling of WJC-A
+    "MEMORIAL CUP":         0.32,  # CHL post-season tournament
+    "CHAMPIONS HL":         0.60,  # European Champions Hockey League
 }
+
+
+# Patterns for leagues that should NEVER be included in NHLe features.
+# These are pre-draft youth / prep-school events where scoring has no
+# predictive value for NHL projection (ages 11-16, tiny sample, uneven
+# competition). Matching is case-insensitive against the uppercased league
+# string; any match excludes the row from `apply_nhle_to_seasons` output.
+EXCLUDED_LEAGUE_PATTERNS = [
+    r"^WSI\b",           # World Selects Invitational (all youth ages)
+    r"^USHS-",           # US high school variants
+    r"^USA-S\d",         # US development squads by age
+    r"^CSSHL",           # Canadian Sport School Hockey League
+    r"\bU1[0-7]\b",      # Any "U10".."U17" tag
+    r"^QAAA$", r"^QMAAA\b",
+    r"^AMBHL$", r"^AMHL$", r"^SAAHL\b",
+    r"^HEO\b", r"^GTHL\b", r"^ALLIANCE\b", r"^WAAA\b", r"^ETAHL\b", r"^T1EHL\b",
+    r"^QC INT",          # Quebec International Pee-Wee
+    r"BRICK",            # Brick Invitational (U10)
+    r"\bPEE ?WEE\b",
+    r"\bBANTAM\b",
+    r"\bMIDGET\b",
+    r"^MN HIGH",         # Minnesota high school
+]
+
+
+def is_excluded_league(league: Optional[str]) -> bool:
+    """True if `league` matches a Tier-4 youth/prep pattern and should not
+    contribute to NHLe feature aggregation."""
+    if not league:
+        return False
+    import re as _re
+    s = str(league).upper().strip()
+    for pat in EXCLUDED_LEAGUE_PATTERNS:
+        if _re.search(pat, s):
+            return True
+    return False
 
 # Age adjustments — applied multiplicatively to NHLe PPG
 # Younger players at equivalent production have higher ceilings
@@ -100,6 +164,17 @@ def apply_nhle_to_seasons(seasons_df: pd.DataFrame,
     suffixes from repeated merges.
     """
     df = seasons_df.copy()
+
+    # Drop Tier-4 youth/prep rows (WSI, USHS, CSSHL, U10-U17, etc). If they
+    # somehow slipped into the seasons table from an older ingestion path,
+    # don't let them pollute NHLe features. The cleanup script purges them
+    # from the DB; this is a safety net for new ingestions.
+    if "league" in df.columns:
+        pre = len(df)
+        df = df[~df["league"].astype(str).apply(is_excluded_league)].copy()
+        dropped = pre - len(df)
+        if dropped:
+            logger.info(f"Dropped {dropped} excluded-league rows during NHLe apply.")
 
     # Drop previously-derived columns so the merge can recreate them cleanly.
     for col in ("dob", "age", "nhle_factor", "age_adj", "nhle_ppg", "nhle_gpg"):
