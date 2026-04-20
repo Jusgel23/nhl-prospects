@@ -463,8 +463,8 @@ def main():
     # backfill-careers
     p_bf = sub.add_parser("backfill-careers",
                            help="Scrape Hockey Reference player career pages (bios + multi-season history)")
-    p_bf.add_argument("--start", type=int, default=1996,
-                       help="First draft year to include (default: 1996)")
+    p_bf.add_argument("--start", type=int, default=1995,
+                       help="First draft year to include (default: 1995)")
     p_bf.add_argument("--end", type=int, default=2026,
                        help="Last draft year to include (default: 2026)")
     p_bf.add_argument("--sample", type=int, default=None,

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 CACHE_PATH = Path(__file__).parents[3] / "data" / "historical" / "draft_outcomes_cache.csv"
 
 
-def load_draft_outcomes(start: int = 1996, end: int = 2026,
+def load_draft_outcomes(start: int = 1995, end: int = 2026,
                          force_refresh: bool = False) -> pd.DataFrame:
     """
     Return historical draft outcomes, scraping Hockey Reference if not cached.
