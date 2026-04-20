@@ -138,7 +138,7 @@ def cmd_train(args):
     outcomes_df = load_outcomes()
 
     if outcomes_df.empty:
-        console.print("[yellow]No cached outcomes — will scrape Hockey Reference (1995-2019). This takes ~3 min...[/]")
+        console.print("[yellow]No cached outcomes — will scrape Hockey Reference. This takes ~3 min...[/]")
         from src.data.loaders.historical import load_draft_outcomes
         outcomes_df = load_draft_outcomes()
         if outcomes_df.empty:
@@ -149,6 +149,24 @@ def cmd_train(args):
 
     features_df = build_feature_matrix(players_df, seasons_df, outcomes_df)
     labeled = features_df[features_df["is_nhler"].notna()]
+
+    # Exclude draft classes whose NHL careers are too fresh to label reliably.
+    # A player with only 3 years of elapsed NHL time hasn't had the chance to
+    # hit 200 GP even if they're trending toward it — treating them as
+    # "not NHLer" would be a false-negative label. Keep the 5-year-minimum
+    # cutoff so we train only on settled outcomes.
+    from datetime import date
+    label_cutoff = date.today().year - 5
+    if "draft_year" in labeled.columns:
+        before = len(labeled)
+        labeled = labeled[
+            labeled["draft_year"].fillna(0).astype(int) <= label_cutoff
+        ]
+        console.print(
+            f"[dim]Filtered to settled outcomes: draft_year ≤ {label_cutoff} → "
+            f"{len(labeled)} of {before} labeled rows (drops recent drafts whose "
+            f"NHL careers are still too young to label).[/]"
+        )
     console.print(f"Training on {len(labeled)} labeled historical prospects...")
 
     predictor = ProspectPredictor()
@@ -445,10 +463,10 @@ def main():
     # backfill-careers
     p_bf = sub.add_parser("backfill-careers",
                            help="Scrape Hockey Reference player career pages (bios + multi-season history)")
-    p_bf.add_argument("--start", type=int, default=1995,
-                       help="First draft year to include (default: 1995)")
-    p_bf.add_argument("--end", type=int, default=2019,
-                       help="Last draft year to include (default: 2019)")
+    p_bf.add_argument("--start", type=int, default=1996,
+                       help="First draft year to include (default: 1996)")
+    p_bf.add_argument("--end", type=int, default=2026,
+                       help="Last draft year to include (default: 2026)")
     p_bf.add_argument("--sample", type=int, default=None,
                        help="Scrape a random sample of N players instead of all")
     p_bf.add_argument("--nhlers-only", action="store_true",
