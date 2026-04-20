@@ -4,7 +4,9 @@ Feature engineering pipeline.
 Builds the feature matrix used for training and inference.
 """
 import logging
+import re
 from datetime import datetime, date
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
@@ -56,6 +58,11 @@ def build_feature_matrix(players_df: pd.DataFrame,
     df = pivot.merge(bio, on="player_id", how="left")
 
     if outcomes_df is not None and not outcomes_df.empty:
+        # Hockey Reference outcomes use their own player_id format, which
+        # doesn't match EliteProspects scraped player_ids. Remap via
+        # normalized name so the left-merge actually finds labels.
+        outcomes_df = _remap_outcomes_to_players(players_df, outcomes_df)
+
         out_cols = ["player_id", "draft_year", "draft_round", "draft_pick",
                     "is_nhler", "is_star", "nhl_gp", "nhl_points"]
         out_cols = [c for c in out_cols if c in outcomes_df.columns]
@@ -206,3 +213,55 @@ def _birth_quarter(dob: str) -> int:
         return (month - 1) // 3 + 1  # 1–4
     except Exception:
         return 2
+
+
+_HR_CACHE_PATH = (
+    Path(__file__).parents[2] / "data" / "historical" / "draft_outcomes_cache.csv"
+)
+
+
+def _normalize_name(s) -> str:
+    """Lowercase, strip anything non-alpha. Good enough for 'Connor McDavid'
+    vs 'Connor M. McDavid' vs 'connor mcdavid'."""
+    return re.sub(r"[^a-z]", "", str(s).lower())
+
+
+def _remap_outcomes_to_players(players_df: pd.DataFrame,
+                                outcomes_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Join historical outcomes to scraped players via normalized name.
+    `nhl_outcomes` only stores Hockey Reference player_ids, which never match
+    the EliteProspects player_ids used in the `players` table. We recover the
+    match by loading the HR cache CSV (which still has names) and matching on
+    normalized name.
+    Returns an outcomes DataFrame whose `player_id` values are replaced with
+    the matching EP player_ids. Unmatched outcomes are dropped.
+    """
+    if players_df.empty or "name" not in players_df.columns:
+        return outcomes_df
+
+    # The DB-stored outcomes table lost the `name` column via the defensive
+    # upsert filter (it's not in the schema). Recover names from the raw cache.
+    if not _HR_CACHE_PATH.exists():
+        logger.warning("Historical outcomes cache missing — cannot remap by name.")
+        return outcomes_df
+
+    hr = pd.read_csv(_HR_CACHE_PATH, usecols=["player_id", "name"])
+    with_name = outcomes_df.merge(hr, on="player_id", how="left")
+    with_name["_norm"] = with_name["name"].apply(_normalize_name)
+
+    players_norm = players_df[["player_id", "name"]].copy()
+    players_norm["_norm"] = players_norm["name"].apply(_normalize_name)
+    # De-dup normalized names on both sides so a merge can't explode rows
+    players_norm = players_norm.drop_duplicates("_norm")
+    with_name = with_name.drop_duplicates("_norm")
+
+    matched = with_name.merge(
+        players_norm[["player_id", "_norm"]].rename(columns={"player_id": "ep_player_id"}),
+        on="_norm", how="inner",
+    )
+    matched["player_id"] = matched["ep_player_id"]
+    matched = matched.drop(columns=["_norm", "ep_player_id", "name"])
+    logger.info(f"Historical outcomes remapped by name: {len(matched)} matches "
+                f"(from {len(outcomes_df)} HR records and {len(players_df)} scraped players).")
+    return matched

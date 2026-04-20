@@ -3,6 +3,20 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-20 — (remap-outcomes)
+**What changed:** `build_feature_matrix` now remaps Hockey Reference
+historical outcomes onto EliteProspects scraped players via normalized
+name before merging. New helper `_remap_outcomes_to_players` loads names
+from the HR CSV cache and joins on a lowercase alpha-only version of the
+name.
+**Why:** Previously the outcomes player_id (HR format like
+`bryan_berard_1995`) never matched the scraped player_id (EP numeric),
+so every merge produced zero labeled training rows. The pipeline
+"trained" on zero samples, leaving `data/models/` empty and every
+prediction as None. Now 365 historical prospects (103 NHLers, 51 stars)
+are correctly labeled.
+**Files:** `src/models/features.py`
+
 ## 2026-04-19 — (gp_rate-guard)
 **What changed:** `_engineer` in `src/models/features.py` now checks
 whether `gp_rate` is present in the DataFrame before calling
