@@ -3,6 +3,18 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-20 — (hr-position-backfill)
+**What changed:** `build_feature_matrix` now backfills missing player
+positions from the Hockey Reference draft outcomes CSV (matched by
+normalized name). HR position values (C/LW/RW/D/G) are normalized to
+the F/D/G buckets the model expects.
+**Why:** Older EP stats pages (2016-2019) don't carry the "(C/LW)"
+suffix the scraper relies on, so ~1,083 of 1,707 players had
+position=None. `_engineer` then `fillna("F")`'d all of them,
+mis-classifying historical defensemen as forwards and leaving the D
+training set empty. Backfill lifts labeled D count from 0 to 88.
+**Files:** `src/models/features.py`
+
 ## 2026-04-20 — (extract-position)
 **What changed:** `_clean_stats_df` now extracts position from the EP
 name suffix ("David Goyette(C/LW)" → position="F") before stripping

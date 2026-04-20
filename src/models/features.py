@@ -52,6 +52,11 @@ def build_feature_matrix(players_df: pd.DataFrame,
     # Pivot seasons to one row per player
     pivot = _pivot_seasons(seasons_df)
 
+    # Backfill missing positions from Hockey Reference outcomes (by name) —
+    # older EP stats pages don't carry the "(C/LW)" suffix so many historical
+    # players have position=None. HR outcomes DO include position for draftees.
+    players_df = _backfill_positions_from_hr(players_df)
+
     # Merge bio
     bio = players_df[["player_id", "name", "dob", "position",
                        "height_cm", "weight_kg"]].drop_duplicates("player_id")
@@ -224,6 +229,47 @@ def _normalize_name(s) -> str:
     """Lowercase, strip anything non-alpha. Good enough for 'Connor McDavid'
     vs 'Connor M. McDavid' vs 'connor mcdavid'."""
     return re.sub(r"[^a-z]", "", str(s).lower())
+
+
+def _backfill_positions_from_hr(players_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill in missing player positions using the Hockey Reference draft cache,
+    matched by normalized name. Older EP pages don't carry the '(C/LW)'
+    suffix that our scraper relies on, so a lot of 2016-2019 players have
+    position=None. HR has position for every draftee.
+    Returns a (possibly) modified copy of players_df.
+    """
+    if players_df.empty or "name" not in players_df.columns:
+        return players_df
+    if not _HR_CACHE_PATH.exists():
+        return players_df
+
+    missing_mask = players_df["position"].isna() | (players_df["position"] == "")
+    if not missing_mask.any():
+        return players_df
+
+    hr = pd.read_csv(_HR_CACHE_PATH, usecols=["name", "position"])
+    hr["_norm"] = hr["name"].apply(_normalize_name)
+    # HR position values are NHL-style (C, LW, RW, D, G). Map to our F/D/G.
+    hr["position"] = hr["position"].apply(
+        lambda x: "F" if pd.notna(x) and str(x).upper()[0] in ("C", "L", "R", "F", "W")
+        else ("D" if pd.notna(x) and "D" in str(x).upper()
+        else ("G" if pd.notna(x) and "G" in str(x).upper() else None))
+    )
+    hr = hr.drop_duplicates("_norm")[["_norm", "position"]].rename(
+        columns={"position": "hr_position"}
+    )
+
+    out = players_df.copy()
+    out["_norm"] = out["name"].apply(_normalize_name)
+    out = out.merge(hr, on="_norm", how="left")
+    fill_mask = (out["position"].isna() | (out["position"] == "")) & out["hr_position"].notna()
+    filled = fill_mask.sum()
+    out.loc[fill_mask, "position"] = out.loc[fill_mask, "hr_position"]
+    out = out.drop(columns=["_norm", "hr_position"])
+    if filled:
+        logger.info(f"Backfilled position for {filled} players from Hockey Reference.")
+    return out
 
 
 def _remap_outcomes_to_players(players_df: pd.DataFrame,
