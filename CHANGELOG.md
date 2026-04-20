@@ -3,6 +3,16 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-19 — (scrape-cache)
+**What changed:** EliteProspects scraper now persists each league-season
+stats table to `data/raw/league_stats/{league}_{season}.csv` and each
+player bio to `data/raw/bios/{player_id}.json`. Both paths short-circuit
+the HTTP fetch when a cache hit is found.
+**Why:** The previous 40-minute scrape was lost entirely when the final
+DB write crashed. With caching, a future crash only loses the current
+league-season; re-runs replay almost instantly.
+**Files:** `src/data/scrapers/eliteprospects.py`
+
 ## 2026-04-19 — (db-fix)
 **What changed:** `_upsert_method` in `src/data/database.py` now accepts either
 a `sqlite3.Cursor` (pandas 2.x) or `sqlite3.Connection` (older pandas) as the

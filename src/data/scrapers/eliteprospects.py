@@ -3,10 +3,12 @@ EliteProspects scraper.
 Uses the eliteprospect-scraper PyPI package where available,
 falls back to direct HTTP requests against the public EP website.
 """
+import json
 import time
 import re
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -16,6 +18,20 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 EP_BASE = "https://www.eliteprospects.com"
+
+# Raw scrape cache — makes re-runs nearly instant for already-fetched data.
+# Both directories are gitignored via data/raw/ in .gitignore.
+RAW_DIR = Path(__file__).parents[3] / "data" / "raw"
+LEAGUE_STATS_CACHE = RAW_DIR / "league_stats"
+BIOS_CACHE = RAW_DIR / "bios"
+
+
+def _league_stats_cache_path(league: str, season: str) -> Path:
+    return LEAGUE_STATS_CACHE / f"{league.upper()}_{season}.csv"
+
+
+def _bio_cache_path(player_id: str) -> Path:
+    return BIOS_CACHE / f"{player_id}.json"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -48,15 +64,23 @@ def _get(url: str, params: dict = None, retries: int = 3) -> requests.Response:
             time.sleep(2 ** attempt)
 
 
-def scrape_league_stats(league: str, season: str) -> pd.DataFrame:
+def scrape_league_stats(league: str, season: str,
+                         use_cache: bool = True) -> pd.DataFrame:
     """
     Scrape player stats for a given league and season from EliteProspects.
     season format: '2024-2025'
     Returns DataFrame with columns matching the seasons table schema.
+    If use_cache=True and a local CSV cache exists, loads from it instead.
     """
     slug = LEAGUE_SLUGS.get(league.upper())
     if not slug:
         raise ValueError(f"Unknown league: {league}")
+
+    cache = _league_stats_cache_path(league, season)
+    if use_cache and cache.exists():
+        logger.info(f"[cache] Loading {league} {season} from {cache.name}")
+        df = pd.read_csv(cache)
+        return _clean_stats_df(df)
 
     url = f"{EP_BASE}/league/{slug}/stats/{season}"
     logger.info(f"Scraping {league} {season} from {url}")
@@ -111,11 +135,26 @@ def scrape_league_stats(league: str, season: str) -> pd.DataFrame:
 
     df = _clean_stats_df(df)
     logger.info(f"  → {len(df)} players scraped for {league} {season}")
+
+    # Persist raw scrape to cache so future runs skip this request
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(cache, index=False)
+
     return df
 
 
-def scrape_player_bio(player_id: str, ep_url: str) -> dict:
-    """Scrape biographical data for a single player."""
+def scrape_player_bio(player_id: str, ep_url: str,
+                       use_cache: bool = True) -> dict:
+    """Scrape biographical data for a single player.
+    If use_cache=True and a local JSON cache exists, loads from it instead —
+    this is where the bulk of the scrape time is spent (HTTP + polite sleep)."""
+    cache = _bio_cache_path(player_id)
+    if use_cache and cache.exists():
+        try:
+            return json.loads(cache.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"Bio cache read failed for {player_id}: {e}; re-fetching.")
+
     logger.debug(f"Scraping bio: {ep_url}")
     resp = _get(ep_url)
     soup = BeautifulSoup(resp.text, "lxml")
@@ -153,6 +192,13 @@ def scrape_player_bio(player_id: str, ep_url: str) -> dict:
         shoots_match = re.search(r"Shoots[:\s]+(Left|Right)", text, re.IGNORECASE)
         if shoots_match:
             bio["shoots"] = shoots_match.group(1).capitalize()
+
+    # Persist bio to cache before the polite delay
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(bio), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Bio cache write failed for {player_id}: {e}")
 
     time.sleep(0.3)
     return bio
