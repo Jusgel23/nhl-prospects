@@ -38,6 +38,10 @@ from src.data.loaders.historical import load_draft_outcomes
 from src.data.scrapers.hockey_reference import (
     build_hr_id_mapping, scrape_player_career,
 )
+from src.data.scrapers.nhl_api import (
+    enrich_player as nhl_enrich_player, load_id_map as nhl_load_id_map,
+    save_id_map as nhl_save_id_map,
+)
 from src.models.nhle import apply_nhle_to_seasons, build_development_arc
 from src.models.features import build_feature_matrix
 from src.models.predictor import ProspectPredictor
@@ -346,6 +350,56 @@ def cmd_backfill_careers(args):
     console.print(f"[bold cyan]Backfill complete.[/] {scraped} career records stored.")
 
 
+def cmd_enrich_nhl_bios(args):
+    """
+    For every EP-scraped player in the DB, look them up in the NHL API and
+    upsert their bio (DOB, height, weight, shoots, draft info) + full career
+    (NHL/AHL/juniors/international). Free, fast — typically 10-30 min for
+    our entire prospect pool. Complements `backfill-careers` (Hockey
+    Reference) which handles historical draftees.
+    """
+    console.rule("[bold magenta]Enriching bios from NHL API")
+    init_db()
+
+    import pandas as pd
+    players_df = load_players()
+    if players_df.empty:
+        console.print("[red]No players in DB — run `collect` first.[/]")
+        return
+
+    # Target = EP-scraped prospects that don't already have an NHL API bio.
+    target = players_df[players_df["source"] == "eliteprospects"].copy()
+    if args.limit:
+        target = target.head(int(args.limit))
+    if args.missing_dob_only:
+        target = target[target["dob"].isna()]
+
+    console.print(f"Targeting {len(target)} EP-scraped players "
+                  f"(of {len(players_df)} total).")
+
+    id_map = nhl_load_id_map()
+    hits, misses = 0, 0
+
+    for i, row in enumerate(target.itertuples(index=False), 1):
+        result = nhl_enrich_player(row.name, row.player_id, id_map=id_map)
+        if result is None:
+            misses += 1
+        else:
+            hits += 1
+            upsert_players(pd.DataFrame([result["bio"]]))
+            if result["seasons"]:
+                upsert_seasons(pd.DataFrame(result["seasons"]))
+
+        if i % 25 == 0 or i == len(target):
+            console.print(f"  {i}/{len(target)} processed "
+                          f"(hits={hits}, misses={misses})")
+            nhl_save_id_map(id_map)
+
+    nhl_save_id_map(id_map)
+    console.print(f"[bold magenta]Done.[/] {hits} players enriched, "
+                  f"{misses} not found in NHL search.")
+
+
 def cmd_pipeline(args):
     """Full pipeline: collect → process → train → rank."""
     cmd_collect(args)
@@ -402,6 +456,14 @@ def main():
     p_bf.add_argument("--refresh-mapping", action="store_true",
                        help="Force re-scrape of the HR ID mapping from draft pages")
 
+    # enrich-nhl-bios
+    p_nhl = sub.add_parser("enrich-nhl-bios",
+                            help="Use NHL.com API to fill bios + careers for EP-scraped prospects")
+    p_nhl.add_argument("--limit", type=int, default=None,
+                       help="Process only the first N players (for testing)")
+    p_nhl.add_argument("--missing-dob-only", action="store_true",
+                       help="Only enrich players whose DOB is currently missing")
+
     # pipeline
     p_pipeline = sub.add_parser("pipeline", help="Run full collect→train→rank pipeline")
     p_pipeline.add_argument("--seasons", nargs="+", default=None)
@@ -419,6 +481,7 @@ def main():
         "report":            cmd_report,
         "pipeline":          cmd_pipeline,
         "backfill-careers":  cmd_backfill_careers,
+        "enrich-nhl-bios":   cmd_enrich_nhl_bios,
     }
 
     if not args.command:
