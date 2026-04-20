@@ -9,9 +9,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import joblib
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.metrics import roc_auc_score, classification_report, brier_score_loss
 from xgboost import XGBClassifier, XGBRegressor
 
 from src.models.features import FEATURE_COLS
@@ -62,31 +63,8 @@ class ProspectPredictor:
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X)
 
-            nhler_model = XGBClassifier(
-                n_estimators=300,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                scale_pos_weight=_pos_weight(y_nhler),
-                use_label_encoder=False,
-                eval_metric="logloss",
-                random_state=42,
-            )
-            nhler_model.fit(X_scaled, y_nhler)
-
-            star_model = XGBClassifier(
-                n_estimators=300,
-                max_depth=4,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                scale_pos_weight=_pos_weight(y_star),
-                use_label_encoder=False,
-                eval_metric="logloss",
-                random_state=42,
-            )
-            star_model.fit(X_scaled, y_star)
+            nhler_model = _fit_calibrated_clf(X_scaled, y_nhler)
+            star_model  = _fit_calibrated_clf(X_scaled, y_star)
 
             pts_model = XGBRegressor(
                 n_estimators=300,
@@ -105,11 +83,22 @@ class ProspectPredictor:
                 "scaler": scaler,
             }
 
-            # Cross-validation AUC
-            cv_scores = cross_val_score(nhler_model, X_scaled, y_nhler,
+            # Cross-validation AUC on the un-calibrated base (faster, same AUC)
+            base_nhler = _base_xgb_clf(y_nhler)
+            cv_scores = cross_val_score(base_nhler, X_scaled, y_nhler,
                                         cv=5, scoring="roc_auc")
             logger.info(f"{label} NHLer model — CV AUC: {cv_scores.mean():.3f} "
                         f"(±{cv_scores.std():.3f})")
+
+            # Brier score on resubstituted predictions — shows calibration quality
+            # (lower is better; perfect = 0, random = 0.25 for 50/50 base rate)
+            nhler_probs = nhler_model.predict_proba(X_scaled)[:, 1]
+            star_probs  = star_model.predict_proba(X_scaled)[:, 1]
+            logger.info(
+                f"{label} Brier scores — "
+                f"NHLer: {brier_score_loss(y_nhler, nhler_probs):.4f}, "
+                f"Star: {brier_score_loss(y_star, star_probs):.4f}"
+            )
 
         self._save()
         logger.info("Models trained and saved.")
@@ -131,22 +120,29 @@ class ProspectPredictor:
             if train.empty or test.empty or "is_nhler" not in test.columns:
                 continue
 
-            model = XGBClassifier(n_estimators=200, max_depth=4,
-                                   learning_rate=0.05, random_state=42,
-                                   use_label_encoder=False, eval_metric="logloss")
             X_tr = train[FEATURE_COLS].fillna(0).values
             y_tr = train["is_nhler"].values
             X_te = test[FEATURE_COLS].fillna(0).values
             y_te = test["is_nhler"].values
 
             scaler = StandardScaler()
-            model.fit(scaler.fit_transform(X_tr), y_tr)
-            probs = model.predict_proba(scaler.transform(X_te))[:, 1]
+            X_tr_s = scaler.fit_transform(X_tr)
+            X_te_s = scaler.transform(X_te)
+
+            model = XGBClassifier(
+                n_estimators=200, max_depth=4,
+                learning_rate=0.05, random_state=42,
+                scale_pos_weight=_pos_weight(y_tr),
+                use_label_encoder=False, eval_metric="logloss",
+            )
+            model.fit(X_tr_s, y_tr)
+            probs = model.predict_proba(X_te_s)[:, 1]
 
             if len(np.unique(y_te)) > 1:
                 auc = roc_auc_score(y_te, probs)
+                brier = brier_score_loss(y_te, probs)
                 aucs.append(auc)
-                logger.info(f"  Year {test_year}: AUC={auc:.3f}  n={len(test)}")
+                logger.info(f"  Year {test_year}: AUC={auc:.3f}  Brier={brier:.4f}  n={len(test)}")
 
         if aucs:
             logger.info(f"Walk-forward mean AUC: {np.mean(aucs):.3f}")
@@ -208,3 +204,37 @@ def _pos_weight(y: np.ndarray) -> float:
     neg = (y == 0).sum()
     pos = (y == 1).sum()
     return float(neg / pos) if pos > 0 else 1.0
+
+
+def _base_xgb_clf(y: np.ndarray) -> XGBClassifier:
+    """Base XGBoost classifier with hyperparameters + class-imbalance weighting."""
+    return XGBClassifier(
+        n_estimators=300,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=_pos_weight(y),
+        use_label_encoder=False,
+        eval_metric="logloss",
+        random_state=42,
+    )
+
+
+def _fit_calibrated_clf(X: np.ndarray, y: np.ndarray) -> CalibratedClassifierCV:
+    """
+    Fit an isotonic-calibrated XGBoost classifier.
+    Falls back to Platt (sigmoid) when the positive class is too thin for
+    isotonic regression to be stable.
+    """
+    n_pos = int((y == 1).sum())
+    # Isotonic regression needs enough positives per CV fold to avoid overfitting.
+    # Rule of thumb: >~50 positives total → isotonic; else sigmoid.
+    method = "isotonic" if n_pos >= 50 else "sigmoid"
+    cv = 5 if n_pos >= 25 else 3
+
+    base = _base_xgb_clf(y)
+    calibrated = CalibratedClassifierCV(estimator=base, method=method, cv=cv)
+    calibrated.fit(X, y)
+    logger.info(f"Calibration: method={method}, cv={cv}, n_pos={n_pos}")
+    return calibrated
