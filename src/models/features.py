@@ -90,11 +90,17 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
 
     df = seasons_df.copy()
 
-    # Per-stage NHLe pivots keyed on draft_label (D-3..D+1)
-    def _lbl(label):
-        return df[df.get("draft_label", pd.Series(["unknown"] * len(df))) == label]
+    # Per-stage NHLe pivots keyed on draft_label (D-3..D+1).
+    # Accept both "D+0" (from build_development_arc) and legacy "D0" labels.
+    def _lbl(label, alt=None):
+        if "draft_label" not in df.columns:
+            return pd.DataFrame(columns=df.columns)
+        mask = df["draft_label"] == label
+        if alt:
+            mask |= df["draft_label"] == alt
+        return df[mask]
 
-    d0  = _lbl("D+0")  if (df.get("draft_label", pd.Series()).eq("D+0").any()) else _lbl("D0")
+    d0  = _lbl("D+0", "D0")
     dm1 = _lbl("D-1")
     dm2 = _lbl("D-2")
     dm3 = _lbl("D-3")
@@ -120,7 +126,20 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
             })
         return agg
 
-    base = best_season(d0 if not d0.empty else df)
+    # Build base from D+0 where we have it, fall back to best career season
+    # for players without a D+0 label (current prospects pre-draft, etc.).
+    if not d0.empty:
+        d0_base = best_season(d0)
+        d0_ids = set(d0_base["player_id"])
+        non_d0 = df[~df["player_id"].isin(d0_ids)]
+        if not non_d0.empty:
+            non_d0_base = best_season(non_d0)
+            base = pd.concat([d0_base, non_d0_base], ignore_index=True)
+        else:
+            base = d0_base
+    else:
+        base = best_season(df)
+
     prev1 = best_season(dm1, "d_minus1") if not dm1.empty else pd.DataFrame()
     prev2 = best_season(dm2, "d_minus2") if not dm2.empty else pd.DataFrame()
     prev3 = best_season(dm3, "d_minus3") if not dm3.empty else pd.DataFrame()

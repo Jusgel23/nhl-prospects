@@ -3,6 +3,35 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-20 — (pipeline-schema-hardening)
+**What changed:** Several follow-up fixes discovered while validating the
+HR career integration end-to-end:
+- `apply_nhle_to_seasons` drops derived columns (dob/age/nhle_factor/etc.)
+  before merging and computes `ppg = points/gp` on-the-fly when missing
+  (HR rows arrive without a pre-computed ppg).
+- `build_development_arc` drops draft_year/draft_label before re-merging,
+  preventing `_x`/`_y` suffix stacking on repeated process runs.
+- `_pivot_seasons` now falls back to "best overall career season" for
+  players who don't have a D+0 labeled row, so the feature matrix stops
+  collapsing to just the HR-labeled subset (went from 1700+ rows to 19
+  after the first HR ingest).
+- `cmd_process` no longer uses `if_exists="replace"` (which nuked the
+  UNIQUE constraint and let duplicates in). It DELETEs then upserts via
+  the defensive method, preserving the CREATE TABLE schema.
+- Extended `seasons` schema with `age`, `nhle_ppg`, `nhle_gpg`,
+  `draft_year`, `draft_label` columns, with idempotent ALTER TABLE
+  migration.
+- HR scraper: shared `_hr_get` helper with 429 backoff (120s×attempts)
+  and 4.5s default inter-request delay — robots.txt allows ~20 req/min
+  but HR throttles at ~18 req/min in practice.
+
+**Why:** The initial end-to-end validation surfaced five interlinked
+bugs that only manifested with the richer HR data. None blocked the
+architecture; they were stacking under repeated pipeline runs.
+
+**Files:** `main.py`, `src/data/database.py`, `src/models/features.py`,
+`src/models/nhle.py`, `src/data/scrapers/hockey_reference.py`
+
 ## 2026-04-20 — (hr-career-scraper)
 **What changed:** Added player-centric career scraping from Hockey Reference.
 New functions in `src/data/scrapers/hockey_reference.py`:

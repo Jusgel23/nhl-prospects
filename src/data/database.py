@@ -46,6 +46,11 @@ def init_db():
             pp_assists  INTEGER,
             gp_rate     REAL,
             ppg         REAL,
+            age         INTEGER,
+            nhle_ppg    REAL,
+            nhle_gpg    REAL,
+            draft_year  INTEGER,
+            draft_label TEXT,
             FOREIGN KEY (player_id) REFERENCES players(player_id),
             UNIQUE(player_id, season, league)
         );
@@ -79,19 +84,30 @@ def init_db():
         );
         """)
 
-        # Migration: add draft_* columns to players for pre-existing DBs.
-        # SQLite has no "ADD COLUMN IF NOT EXISTS" — PRAGMA the schema instead.
-        existing_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()
-        }
-        for col, ddl in [
-            ("draft_year",  "ALTER TABLE players ADD COLUMN draft_year INTEGER"),
-            ("draft_round", "ALTER TABLE players ADD COLUMN draft_round INTEGER"),
-            ("draft_pick",  "ALTER TABLE players ADD COLUMN draft_pick INTEGER"),
-            ("draft_team",  "ALTER TABLE players ADD COLUMN draft_team TEXT"),
-        ]:
-            if col not in existing_cols:
-                conn.execute(ddl)
+        # Migration: add missing columns to players / seasons for pre-existing
+        # DBs. SQLite has no "ADD COLUMN IF NOT EXISTS" — PRAGMA the schema.
+        def _ensure_cols(table: str, wanted: list[tuple[str, str]]):
+            have = {
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for col, col_type in wanted:
+                if col not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+
+        _ensure_cols("players", [
+            ("draft_year",  "INTEGER"),
+            ("draft_round", "INTEGER"),
+            ("draft_pick",  "INTEGER"),
+            ("draft_team",  "TEXT"),
+        ])
+        _ensure_cols("seasons", [
+            ("age",         "INTEGER"),
+            ("nhle_ppg",    "REAL"),
+            ("nhle_gpg",    "REAL"),
+            ("draft_year",  "INTEGER"),
+            ("draft_label", "TEXT"),
+        ])
 
 
 def upsert_players(df: pd.DataFrame):

@@ -87,10 +87,29 @@ def apply_nhle_to_seasons(seasons_df: pd.DataFrame,
                            players_df: pd.DataFrame) -> pd.DataFrame:
     """
     Enrich a seasons DataFrame with nhle_ppg and age columns.
-    seasons_df must have: player_id, season, league, ppg
+    seasons_df must have: player_id, season, league, (ppg OR points+gp)
     players_df must have: player_id, dob
+    Idempotent: drops prior derived columns so re-runs don't stack _x/_y
+    suffixes from repeated merges.
     """
     df = seasons_df.copy()
+
+    # Drop previously-derived columns so the merge can recreate them cleanly.
+    for col in ("dob", "age", "nhle_factor", "age_adj", "nhle_ppg", "nhle_gpg"):
+        if col in df.columns:
+            df = df.drop(columns=[col])
+
+    # HR-sourced rows arrive without a ppg column — derive it.
+    if "ppg" not in df.columns or df["ppg"].isna().all():
+        df["ppg"] = 0.0
+    missing_ppg = df["ppg"].isna() | (df["ppg"] == 0)
+    if "points" in df.columns and "gp" in df.columns:
+        derived = (
+            pd.to_numeric(df["points"], errors="coerce")
+            / pd.to_numeric(df["gp"], errors="coerce").replace(0, np.nan)
+        ).round(3)
+        df.loc[missing_ppg, "ppg"] = derived[missing_ppg].fillna(0.0)
+
     bio = players_df[["player_id", "dob"]].drop_duplicates("player_id")
     df = df.merge(bio, on="player_id", how="left")
 
@@ -124,6 +143,11 @@ def build_development_arc(nhle_df: pd.DataFrame,
     This lets the D-relative labels populate for current undrafted prospects.
     """
     df = nhle_df.copy()
+
+    # Drop previously-derived columns so the merge doesn't stack _x/_y.
+    for col in ("draft_year", "season_start_yr", "draft_delta", "draft_label"):
+        if col in df.columns:
+            df = df.drop(columns=[col])
 
     if outcomes_df is None or outcomes_df.empty or "draft_year" not in outcomes_df.columns:
         logger.warning("No outcomes — falling back to DOB-inferred draft years only.")

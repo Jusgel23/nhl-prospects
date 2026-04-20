@@ -32,8 +32,30 @@ HR_CAREER_CACHE = _RAW_ROOT / "hr_careers"
 HR_ID_MAPPING_CACHE = Path(__file__).parents[3] / "data" / "historical" / "hr_id_mapping.json"
 
 # Polite delay for HR career pages — robots.txt asks for no more than
-# 20 requests per minute, so ~3.5s is a safe floor.
-HR_CAREER_DELAY = 3.5
+# 20 requests per minute, so ~3.5s is a safe floor. HR in practice
+# starts returning 429s at around 18 req/min, so 4-5s is safer.
+HR_CAREER_DELAY = 4.5
+HR_RATE_LIMIT_BACKOFF = 120.0  # seconds to wait after a 429
+
+
+def _hr_get(url: str, timeout: int = 20, max_retries: int = 3) -> Optional[requests.Response]:
+    """GET with 429 backoff. Returns Response on success, None after final failure."""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=timeout)
+            if resp.status_code == 429:
+                wait = HR_RATE_LIMIT_BACKOFF * (attempt + 1)
+                logger.warning(f"429 from HR on attempt {attempt+1}; backing off {wait:.0f}s")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except requests.RequestException as e:
+            if attempt == max_retries - 1:
+                logger.warning(f"HR fetch failed for {url}: {e}")
+                return None
+            time.sleep(5 * (attempt + 1))
+    return None
 
 
 def scrape_draft_year(year: int) -> pd.DataFrame:
@@ -180,11 +202,8 @@ def _extract_hr_ids_for_year(year: int) -> dict[str, str]:
     (pd.read_html drops them).
     """
     url = f"{HR_BASE}/draft/NHL_{year}_entry.html"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.warning(f"Failed to fetch draft {year} for ID mapping: {e}")
+    resp = _hr_get(url)
+    if resp is None:
         return {}
 
     # HR often wraps draft tables in HTML comments; strip them so BS4 sees the table.
@@ -413,11 +432,8 @@ def scrape_player_career(hr_player_id: str,
 
     first_letter = hr_player_id[0].lower()
     url = f"{HR_BASE}/players/{first_letter}/{hr_player_id}.html"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        logger.warning(f"Failed to fetch career for {hr_player_id}: {e}")
+    resp = _hr_get(url)
+    if resp is None:
         return None
 
     # HR hides many tables inside HTML comments. Strip comment markers BEFORE

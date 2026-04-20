@@ -112,11 +112,16 @@ def cmd_process(args):
     if not outcomes_df.empty:
         seasons_df = build_development_arc(seasons_df, outcomes_df)
 
-    # Save processed seasons back (overwrite)
+    # Save processed seasons back. We used to do `if_exists="replace"` here
+    # which dropped the schema (UNIQUE constraint + new derived columns after
+    # each run), causing duplicate rows and _x/_y column drift. Instead:
+    # DELETE all rows then upsert so the CREATE TABLE schema (now extended
+    # to carry the derived columns) is preserved.
     from src.data.database import get_conn
-    import pandas as pd
     with get_conn() as conn:
-        seasons_df.to_sql("seasons", conn, if_exists="replace", index=False)
+        conn.execute("DELETE FROM seasons")
+        conn.commit()
+    upsert_seasons(seasons_df)
 
     console.print("[bold blue]Processing complete.[/]")
 
