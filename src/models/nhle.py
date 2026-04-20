@@ -65,9 +65,16 @@ def age_at_season_midpoint(dob: str, season: str) -> Optional[int]:
 
 
 def age_adjustment(age: Optional[int]) -> float:
-    if age is None:
+    # Treat missing age as "unknown, don't penalize" — otherwise NaN would
+    # fall through the dict lookup to DEFAULT_AGE_ADJ (0.78, the 24+ rate),
+    # unfairly deflating NHLe for any player without a DOB.
+    if age is None or pd.isna(age):
         return 1.0
-    return AGE_ADJUSTMENTS.get(age, DEFAULT_AGE_ADJ)
+    try:
+        age_int = int(age)
+    except (TypeError, ValueError):
+        return 1.0
+    return AGE_ADJUSTMENTS.get(age_int, DEFAULT_AGE_ADJ)
 
 
 def compute_nhle_ppg(ppg: float, league: str, age: Optional[int] = None,
