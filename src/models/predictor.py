@@ -17,6 +17,37 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from src.models.features import FEATURE_COLS
 
+# Monotonic constraints for XGBoost — one sign per entry in FEATURE_COLS,
+# same order. +1 = higher feature value must not decrease predicted prob.
+# -1 = higher feature must not increase prob. 0 = no constraint.
+# This fixes out-of-distribution extrapolation: an elite outlier (e.g. a D-man
+# with junior NHLe well above any historical training example) would otherwise
+# be rated LOWER than mid-pack players simply because the model never learned
+# a rule for that range.
+_MONOTONE_CONSTRAINTS_BY_COL = {
+    "nhle_ppg":           1,
+    "nhle_ppg_d_minus1":  1,
+    "nhle_ppg_d_minus2":  1,
+    "nhle_ppg_d_minus3":  1,
+    "nhle_ppg_d_plus1":   1,
+    "peak_nhle_ppg":      1,
+    "ppg_delta":          1,
+    "nhle_gpg":           1,
+    "age_at_draft":      -1,   # younger prospects have higher ceilings
+    "birth_quarter":      0,
+    "height_cm":          0,
+    "weight_kg":          0,
+    "gp_rate":            1,   # more games = healthy / trusted
+    "pim_per_game":       0,   # ambiguous signal
+    "pp_pts_pct":         0,   # ambiguous: skill indicator vs PP-dependent scorer
+    "league_count":       0,
+    "is_forward":         0,
+    "league_enc":         0,
+}
+MONOTONE_CONSTRAINTS = tuple(
+    _MONOTONE_CONSTRAINTS_BY_COL.get(c, 0) for c in FEATURE_COLS
+)
+
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parents[2] / "data" / "models"
@@ -133,6 +164,7 @@ class ProspectPredictor:
                 n_estimators=200, max_depth=4,
                 learning_rate=0.05, random_state=42,
                 scale_pos_weight=_pos_weight(y_tr),
+                monotone_constraints=MONOTONE_CONSTRAINTS,
                 use_label_encoder=False, eval_metric="logloss",
             )
             model.fit(X_tr_s, y_tr)
@@ -207,7 +239,8 @@ def _pos_weight(y: np.ndarray) -> float:
 
 
 def _base_xgb_clf(y: np.ndarray) -> XGBClassifier:
-    """Base XGBoost classifier with hyperparameters + class-imbalance weighting."""
+    """Base XGBoost classifier with hyperparameters + class-imbalance weighting
+    + monotonic constraints so higher production always predicts higher prob."""
     return XGBClassifier(
         n_estimators=300,
         max_depth=4,
@@ -215,6 +248,7 @@ def _base_xgb_clf(y: np.ndarray) -> XGBClassifier:
         subsample=0.8,
         colsample_bytree=0.8,
         scale_pos_weight=_pos_weight(y),
+        monotone_constraints=MONOTONE_CONSTRAINTS,
         use_label_encoder=False,
         eval_metric="logloss",
         random_state=42,
