@@ -231,6 +231,12 @@ def scrape_draft_class(seasons: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
                         try:
                             bio = scrape_player_bio(row["player_id"], row["ep_url"])
                             bio.setdefault("name", row["name"])
+                            # Fallback position from the stats-table name suffix
+                            # (bio scraper can't currently extract from EP's
+                            # redesigned pages).
+                            stats_pos = row.get("position")
+                            if not bio.get("position") and pd.notna(stats_pos) and stats_pos:
+                                bio["position"] = stats_pos
                             all_bios.append(bio)
                         except Exception as e:
                             logger.warning(f"Bio scrape failed for {row['name']}: {e}")
@@ -317,11 +323,18 @@ def _clean_stats_df(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Strip position suffix that EP embeds in the stats-table name,
-    # e.g. "David Goyette(C/LW)" -> "David Goyette"
+    # Extract position from the name suffix BEFORE stripping it,
+    # e.g. "David Goyette(C/LW)" -> name="David Goyette", position="F"
+    # This is our only source of position data because the bio scraper
+    # currently can't match EP's updated page layout.
     if "name" in df.columns:
+        name_series = df["name"].astype(str)
+        raw_pos = name_series.str.extract(r"\(([^)]+)\)\s*$", expand=False)
+        df["position"] = raw_pos.apply(
+            lambda x: _normalize_position(x) if pd.notna(x) else None
+        )
         df["name"] = (
-            df["name"].astype(str)
+            name_series
             .str.replace(r"\s*\([^)]*\)\s*$", "", regex=True)
             .str.strip()
         )

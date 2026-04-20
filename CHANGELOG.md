@@ -3,6 +3,19 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-20 — (extract-position)
+**What changed:** `_clean_stats_df` now extracts position from the EP
+name suffix ("David Goyette(C/LW)" → position="F") before stripping
+the suffix, and `scrape_draft_class` uses that as a fallback when the
+bio scrape doesn't provide one.
+**Why:** Every scraped player had `position=None` because the bio
+scraper can't match EP's redesigned page layout. `_engineer` then
+`fillna("F")`'d all of them, classifying every prospect as a forward,
+so the Defenseman model had zero labeled rows and only `model_F.pkl`
+was produced. Predictions for D-men came out as NaN; comparables index
+was skewed.
+**Files:** `src/data/scrapers/eliteprospects.py`
+
 ## 2026-04-20 — (remap-outcomes)
 **What changed:** `build_feature_matrix` now remaps Hockey Reference
 historical outcomes onto EliteProspects scraped players via normalized
