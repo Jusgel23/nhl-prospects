@@ -3,6 +3,14 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-19 — (db-fix)
+**What changed:** `_upsert_method` in `src/data/database.py` now accepts either
+a `sqlite3.Cursor` (pandas 2.x) or `sqlite3.Connection` (older pandas) as the
+`conn` argument passed to pandas' `to_sql` callback.
+**Why:** Pipeline crashed with `AttributeError: 'sqlite3.Cursor' object has
+no attribute 'cursor'` after a ~40 minute scrape, losing all in-memory data.
+**Files:** `src/data/database.py`
+
 ## 2026-04-19 — 3fd9fda
 **What changed:** Wrapped NHLer and Star XGBoost classifiers in
 `CalibratedClassifierCV` (isotonic when ≥50 positives, Platt otherwise);

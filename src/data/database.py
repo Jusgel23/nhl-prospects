@@ -127,9 +127,11 @@ def load_predictions() -> pd.DataFrame:
 
 def _upsert_method(pk: Optional[str]):
     def method(table, conn, keys, data_iter):
-        cursor = conn.cursor()
         placeholders = ", ".join(["?"] * len(keys))
         cols = ", ".join(keys)
         sql = f"INSERT OR REPLACE INTO {table.name} ({cols}) VALUES ({placeholders})"
-        cursor.executemany(sql, data_iter)
+        # pandas 2.x passes a sqlite3.Cursor directly; older versions passed a
+        # sqlite3.Connection. Support both.
+        executor = conn.cursor() if hasattr(conn, "cursor") else conn
+        executor.executemany(sql, data_iter)
     return method
