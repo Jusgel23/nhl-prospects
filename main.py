@@ -35,6 +35,9 @@ from src.data.database import upsert_predictions
 from src.data.scrapers.eliteprospects import scrape_draft_class
 from src.data.scrapers.uscho import scrape_ncaa_multiple_seasons
 from src.data.loaders.historical import load_draft_outcomes
+from src.data.scrapers.hockey_reference import (
+    build_hr_id_mapping, scrape_player_career,
+)
 from src.models.nhle import apply_nhle_to_seasons, build_development_arc
 from src.models.features import build_feature_matrix
 from src.models.predictor import ProspectPredictor
@@ -251,6 +254,93 @@ def cmd_report(args):
     console.print(report)
 
 
+def cmd_backfill_careers(args):
+    """
+    One-time: scrape Hockey Reference player career pages for every
+    historical draftee we've already seen, upserting full bios +
+    multi-season career into the DB. Feeds model training with richer
+    features (DOB, D-3/D-2/D-1/D0/D+1 trajectory, proper age adjustment).
+    """
+    console.rule("[bold cyan]Backfilling HR player careers")
+    init_db()
+
+    outcomes_df = load_outcomes()
+    if outcomes_df.empty:
+        console.print("[red]No historical outcomes found. Run `collect` first.[/]")
+        return
+
+    # Build (or load from cache) the synthetic_id → hr_player_id mapping.
+    start = int(args.start or 1995)
+    end = int(args.end or 2019)
+    mapping = build_hr_id_mapping(start=start, end=end, force_refresh=args.refresh_mapping)
+    console.print(f"HR ID mapping: {len(mapping)} entries")
+
+    # Select which synthetic IDs to scrape careers for
+    target_ids = outcomes_df["player_id"].tolist()
+    if args.sample:
+        import random
+        random.seed(42)
+        target_ids = random.sample(target_ids, min(args.sample, len(target_ids)))
+        console.print(f"[yellow]Sampling[/] {len(target_ids)} of {len(outcomes_df)} players")
+    if args.nhlers_only:
+        nhler_ids = set(outcomes_df[outcomes_df["is_nhler"] == 1]["player_id"])
+        target_ids = [p for p in target_ids if p in nhler_ids]
+        console.print(f"[yellow]NHLers only:[/] {len(target_ids)} players")
+
+    # Translate to HR IDs (drop any we couldn't map)
+    hr_ids = [mapping.get(p) for p in target_ids]
+    hr_ids = [h for h in hr_ids if h]
+    missing = len(target_ids) - len(hr_ids)
+    if missing:
+        console.print(f"[yellow]Could not map[/] {missing} players to HR IDs (rare names / alt spellings)")
+
+    console.print(f"Scraping {len(hr_ids)} HR career pages "
+                  f"(~{len(hr_ids) * 3.5 / 60:.0f} min at 3.5s/player, resumable via cache)")
+
+    # Loop and upsert per-player so crashes preserve progress
+    scraped = 0
+    import pandas as pd
+    for i, hr_id in enumerate(hr_ids, 1):
+        career = scrape_player_career(hr_id)
+        if career is None:
+            continue
+
+        # Upsert bio row — use hr_player_id as the canonical player_id for
+        # historical data. This lines up with outcomes table keys.
+        syn_id = next((s for s, h in mapping.items() if h == hr_id), hr_id)
+        bio_row = {
+            "player_id":  syn_id,            # matches outcomes table
+            "name":       career.get("name"),
+            "dob":        career.get("dob"),
+            "nationality":career.get("nationality"),
+            "position":   career.get("position"),
+            "height_cm":  career.get("height_cm"),
+            "weight_kg":  career.get("weight_kg"),
+            "shoots":     career.get("shoots"),
+            "source":     "hockey_reference",
+            "draft_year": career.get("draft_year"),
+            "draft_round":career.get("draft_round"),
+            "draft_pick": career.get("draft_pick"),
+            "draft_team": career.get("draft_team"),
+        }
+        upsert_players(pd.DataFrame([bio_row]))
+
+        # Upsert seasons
+        seasons = career.get("seasons", [])
+        if seasons:
+            s_df = pd.DataFrame(seasons)
+            s_df["player_id"] = syn_id
+            # Keep only columns that exist in the seasons schema; defensive
+            # upsert will drop any extras anyway.
+            upsert_seasons(s_df)
+
+        scraped += 1
+        if i % 50 == 0 or i == len(hr_ids):
+            console.print(f"  {i}/{len(hr_ids)} processed ({scraped} upserted)")
+
+    console.print(f"[bold cyan]Backfill complete.[/] {scraped} career records stored.")
+
+
 def cmd_pipeline(args):
     """Full pipeline: collect → process → train → rank."""
     cmd_collect(args)
@@ -293,6 +383,20 @@ def main():
     p_report = sub.add_parser("report", help="Generate per-player scouting report")
     p_report.add_argument("--player", type=str, required=True)
 
+    # backfill-careers
+    p_bf = sub.add_parser("backfill-careers",
+                           help="Scrape Hockey Reference player career pages (bios + multi-season history)")
+    p_bf.add_argument("--start", type=int, default=1995,
+                       help="First draft year to include (default: 1995)")
+    p_bf.add_argument("--end", type=int, default=2019,
+                       help="Last draft year to include (default: 2019)")
+    p_bf.add_argument("--sample", type=int, default=None,
+                       help="Scrape a random sample of N players instead of all")
+    p_bf.add_argument("--nhlers-only", action="store_true",
+                       help="Only scrape players with is_nhler=1 (faster, less balanced)")
+    p_bf.add_argument("--refresh-mapping", action="store_true",
+                       help="Force re-scrape of the HR ID mapping from draft pages")
+
     # pipeline
     p_pipeline = sub.add_parser("pipeline", help="Run full collect→train→rank pipeline")
     p_pipeline.add_argument("--seasons", nargs="+", default=None)
@@ -303,12 +407,13 @@ def main():
 
     args = parser.parse_args()
     dispatch = {
-        "collect":  cmd_collect,
-        "process":  cmd_process,
-        "train":    cmd_train,
-        "rank":     cmd_rank,
-        "report":   cmd_report,
-        "pipeline": cmd_pipeline,
+        "collect":           cmd_collect,
+        "process":           cmd_process,
+        "train":             cmd_train,
+        "rank":              cmd_rank,
+        "report":            cmd_report,
+        "pipeline":          cmd_pipeline,
+        "backfill-careers":  cmd_backfill_careers,
     }
 
     if not args.command:

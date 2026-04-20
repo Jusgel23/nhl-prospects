@@ -17,6 +17,9 @@ FEATURE_COLS = [
     "nhle_ppg",          # NHLe-adjusted PPG (best single predictor)
     "nhle_ppg_d_minus1", # Prior season NHLe PPG
     "nhle_ppg_d_minus2", # Two seasons prior
+    "nhle_ppg_d_minus3", # Three seasons prior — early-development signal
+    "nhle_ppg_d_plus1",  # Post-draft year — junior→pro transition signal
+    "peak_nhle_ppg",     # Max NHLe PPG across entire career
     "ppg_delta",         # Avg year-over-year NHLe improvement
     "nhle_gpg",          # NHLe-adjusted goals per game
     "age_at_draft",      # Age on June 1 of draft year
@@ -26,6 +29,7 @@ FEATURE_COLS = [
     "gp_rate",           # Games played / team games (usage/health)
     "pim_per_game",      # Physicality proxy
     "pp_pts_pct",        # % of points on power play (5v5 skill signal)
+    "league_count",      # Distinct leagues skated in — development breadth
     "is_forward",        # 1=F, 0=D (position encoded)
     "league_enc",        # Ordinal league strength encoding
 ]
@@ -86,10 +90,15 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
 
     df = seasons_df.copy()
 
-    # Best/most recent draft-eligible season (D0 = draft year season)
-    d0 = df[df.get("draft_label", pd.Series(["unknown"] * len(df))) == "D0"]
-    dm1 = df[df.get("draft_label", pd.Series(["unknown"] * len(df))) == "D-1"]
-    dm2 = df[df.get("draft_label", pd.Series(["unknown"] * len(df))) == "D-2"]
+    # Per-stage NHLe pivots keyed on draft_label (D-3..D+1)
+    def _lbl(label):
+        return df[df.get("draft_label", pd.Series(["unknown"] * len(df))) == label]
+
+    d0  = _lbl("D+0")  if (df.get("draft_label", pd.Series()).eq("D+0").any()) else _lbl("D0")
+    dm1 = _lbl("D-1")
+    dm2 = _lbl("D-2")
+    dm3 = _lbl("D-3")
+    dp1 = _lbl("D+1")
 
     def best_season(subset: pd.DataFrame, suffix: str = "") -> pd.DataFrame:
         if subset.empty:
@@ -114,6 +123,8 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
     base = best_season(d0 if not d0.empty else df)
     prev1 = best_season(dm1, "d_minus1") if not dm1.empty else pd.DataFrame()
     prev2 = best_season(dm2, "d_minus2") if not dm2.empty else pd.DataFrame()
+    prev3 = best_season(dm3, "d_minus3") if not dm3.empty else pd.DataFrame()
+    post1 = best_season(dp1, "d_plus1")  if not dp1.empty else pd.DataFrame()
 
     result = base
     if not prev1.empty:
@@ -122,6 +133,20 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         result["nhle_ppg_d_minus1"] = np.nan
+
+    if not prev3.empty:
+        result = result.merge(
+            prev3[["player_id", "nhle_ppg_d_minus3"]], on="player_id", how="left"
+        )
+    else:
+        result["nhle_ppg_d_minus3"] = np.nan
+
+    if not post1.empty:
+        result = result.merge(
+            post1[["player_id", "nhle_ppg_d_plus1"]], on="player_id", how="left"
+        )
+    else:
+        result["nhle_ppg_d_plus1"] = np.nan
 
     if not prev2.empty:
         result = result.merge(
@@ -132,6 +157,28 @@ def _pivot_seasons(seasons_df: pd.DataFrame) -> pd.DataFrame:
 
     # Development delta: average improvement across available seasons
     result["ppg_delta"] = _compute_ppg_deltas(seasons_df)
+
+    # Peak NHLe PPG across a player's entire career (regardless of stage)
+    if "nhle_ppg" in seasons_df.columns:
+        peaks = (
+            seasons_df.groupby("player_id")["nhle_ppg"]
+            .max()
+            .rename("peak_nhle_ppg")
+            .reset_index()
+        )
+        result = result.merge(peaks, on="player_id", how="left")
+    else:
+        result["peak_nhle_ppg"] = np.nan
+
+    # League breadth — how many distinct leagues the player has skated in
+    league_counts = (
+        seasons_df.groupby("player_id")["league"]
+        .nunique()
+        .rename("league_count")
+        .reset_index()
+    )
+    result = result.merge(league_counts, on="player_id", how="left")
+
     return result
 
 
@@ -203,13 +250,26 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _age_at_draft(row) -> float:
+    """Age on June 1 of draft year. Requires both a valid DOB and a known
+    draft year — falls back to 18.5 only if neither is computable. For
+    undrafted prospects with a DOB, draft year is inferred upstream in
+    build_development_arc, so we shouldn't hit the fallback for them."""
     try:
-        dob = datetime.strptime(row["dob"], "%Y-%m-%d").date()
-        draft_yr = int(row.get("draft_year", datetime.now().year))
-        draft_date = date(draft_yr, 6, 1)
+        dob = datetime.strptime(str(row["dob"]), "%Y-%m-%d").date()
+    except Exception:
+        return 18.5
+
+    draft_yr = row.get("draft_year")
+    if pd.isna(draft_yr) or draft_yr in (None, 0, ""):
+        # Fall back to the year they turn 18 (standard NHL draft eligibility).
+        # Better than datetime.now(), which gave current prospects wildly wrong ages.
+        draft_yr = dob.year + 18
+
+    try:
+        draft_date = date(int(draft_yr), 6, 1)
         return round((draft_date - dob).days / 365.25, 2)
     except Exception:
-        return 18.5  # median assumption
+        return 18.5
 
 
 def _birth_quarter(dob: str) -> int:

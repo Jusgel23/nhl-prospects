@@ -23,7 +23,11 @@ def init_db():
             height_cm   REAL,
             weight_kg   REAL,
             shoots      TEXT,
-            source      TEXT
+            source      TEXT,
+            draft_year  INTEGER,
+            draft_round INTEGER,
+            draft_pick  INTEGER,
+            draft_team  TEXT
         );
 
         CREATE TABLE IF NOT EXISTS seasons (
@@ -74,6 +78,20 @@ def init_db():
             FOREIGN KEY (player_id) REFERENCES players(player_id)
         );
         """)
+
+        # Migration: add draft_* columns to players for pre-existing DBs.
+        # SQLite has no "ADD COLUMN IF NOT EXISTS" — PRAGMA the schema instead.
+        existing_cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(players)").fetchall()
+        }
+        for col, ddl in [
+            ("draft_year",  "ALTER TABLE players ADD COLUMN draft_year INTEGER"),
+            ("draft_round", "ALTER TABLE players ADD COLUMN draft_round INTEGER"),
+            ("draft_pick",  "ALTER TABLE players ADD COLUMN draft_pick INTEGER"),
+            ("draft_team",  "ALTER TABLE players ADD COLUMN draft_team TEXT"),
+        ]:
+            if col not in existing_cols:
+                conn.execute(ddl)
 
 
 def upsert_players(df: pd.DataFrame):

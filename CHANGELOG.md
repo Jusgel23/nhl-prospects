@@ -3,6 +3,41 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-20 — (hr-career-scraper)
+**What changed:** Added player-centric career scraping from Hockey Reference.
+New functions in `src/data/scrapers/hockey_reference.py`:
+`scrape_player_career`, `scrape_all_careers`, `build_hr_id_mapping`. HR ID
+mapping (synthetic → real `mcdavco01`-style IDs) cached to
+`data/historical/hr_id_mapping.json`. Per-player careers cached to
+`data/raw/hr_careers/{hr_id}.json`.
+
+New CLI subcommand `python main.py backfill-careers [--start YEAR] [--end YEAR]
+[--sample N] [--nhlers-only]` orchestrates HR ID mapping + career scraping
+and upserts to DB.
+
+DB schema: added `draft_year`, `draft_round`, `draft_pick`, `draft_team`
+columns to `players` via idempotent PRAGMA migration in `init_db`.
+
+Feature engineering:
+- `_pivot_seasons` now extracts D-3 and D+1 NHLe in addition to D-1/D-2.
+- `FEATURE_COLS` gains `nhle_ppg_d_minus3`, `nhle_ppg_d_plus1`,
+  `peak_nhle_ppg`, `league_count` (18 cols total, up from 14).
+- `_age_at_draft` drops `datetime.now()` fallback; infers draft year as
+  (birth_year + 18) when missing.
+- `build_development_arc` in `src/models/nhle.py` now infers draft year
+  from DOB when `outcomes_df` doesn't have it, so current undrafted
+  prospects get D-relative labels.
+
+**Why:** Model was underfitting with only 371 labeled samples and Parekh
+was ranked #48/94 D-men despite elite production. Root causes: no DOB
+meant age adjustments defaulted; D-3/D+1 trajectory features were absent;
+bio scraper was broken. HR has everything we need in a server-rendered
+HTML page that's trivial to scrape, and it's already the source of our
+draft outcomes.
+
+**Files:** `src/data/scrapers/hockey_reference.py`, `src/data/database.py`,
+`src/models/features.py`, `src/models/nhle.py`, `main.py`
+
 ## 2026-04-20 — (hr-position-backfill)
 **What changed:** `build_feature_matrix` now backfills missing player
 positions from the Hockey Reference draft outcomes CSV (matched by

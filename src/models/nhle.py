@@ -119,17 +119,39 @@ def build_development_arc(nhle_df: pd.DataFrame,
     Labels seasons as D-2, D-1, D0, D+1 etc.
 
     outcomes_df must have: player_id, draft_year
+    If a player has no draft_year in outcomes but has a DOB on their season
+    row, we infer draft_year as (birth_year + 18) — standard NHL eligibility.
+    This lets the D-relative labels populate for current undrafted prospects.
     """
-    if outcomes_df.empty or "draft_year" not in outcomes_df.columns:
-        logger.warning("No draft year data — cannot compute development arc.")
-        return nhle_df
+    df = nhle_df.copy()
 
-    draft_years = outcomes_df[["player_id", "draft_year"]].drop_duplicates("player_id")
-    df = nhle_df.merge(draft_years, on="player_id", how="left")
+    if outcomes_df is None or outcomes_df.empty or "draft_year" not in outcomes_df.columns:
+        logger.warning("No outcomes — falling back to DOB-inferred draft years only.")
+    else:
+        draft_years = outcomes_df[["player_id", "draft_year"]].drop_duplicates("player_id")
+        df = df.merge(draft_years, on="player_id", how="left")
+
+    if "draft_year" not in df.columns:
+        df["draft_year"] = np.nan
+
+    # Infer draft_year from DOB where missing
+    def _infer_draft_year(row):
+        dy = row.get("draft_year")
+        if pd.notna(dy) and dy not in (None, 0):
+            return dy
+        dob = row.get("dob")
+        if pd.notna(dob):
+            try:
+                return int(str(dob)[:4]) + 18
+            except Exception:
+                return np.nan
+        return np.nan
+
+    df["draft_year"] = df.apply(_infer_draft_year, axis=1)
 
     def season_year(s: str) -> int:
         try:
-            return int(s.split("-")[0])
+            return int(str(s).split("-")[0])
         except Exception:
             return 0
 
