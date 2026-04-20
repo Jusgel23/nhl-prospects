@@ -127,11 +127,23 @@ def load_predictions() -> pd.DataFrame:
 
 def _upsert_method(pk: Optional[str]):
     def method(table, conn, keys, data_iter):
-        placeholders = ", ".join(["?"] * len(keys))
-        cols = ", ".join(keys)
-        sql = f"INSERT OR REPLACE INTO {table.name} ({cols}) VALUES ({placeholders})"
         # pandas 2.x passes a sqlite3.Cursor directly; older versions passed a
         # sqlite3.Connection. Support both.
         executor = conn.cursor() if hasattr(conn, "cursor") else conn
-        executor.executemany(sql, data_iter)
+
+        # Filter to columns that actually exist on the target table — lets
+        # upstream DataFrames carry extra columns without crashing the insert.
+        executor.execute(f"PRAGMA table_info({table.name})")
+        table_cols = {row[1] for row in executor.fetchall()}
+        valid_indices = [i for i, k in enumerate(keys) if k in table_cols]
+        valid_keys = [keys[i] for i in valid_indices]
+
+        if not valid_keys:
+            return  # nothing in common with the table — nothing to insert
+
+        placeholders = ", ".join(["?"] * len(valid_keys))
+        cols = ", ".join(valid_keys)
+        sql = f"INSERT OR REPLACE INTO {table.name} ({cols}) VALUES ({placeholders})"
+        filtered = ([row[i] for i in valid_indices] for row in data_iter)
+        executor.executemany(sql, filtered)
     return method

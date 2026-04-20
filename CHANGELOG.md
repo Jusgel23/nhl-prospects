@@ -3,6 +3,17 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-19 — (defensive-upsert)
+**What changed:** `_upsert_method` now queries the target table's schema
+via `PRAGMA table_info` and filters the insert to only the columns that
+actually exist. Extra DataFrame columns are silently dropped instead of
+triggering a SQLite "no such column" error.
+**Why:** Third consecutive schema-mismatch crash — this time `upsert_outcomes`
+failed because the historical-outcomes cache carries `name` and `position`
+columns that `nhl_outcomes` doesn't have. Defensive filtering kills the
+entire class of bug going forward.
+**Files:** `src/data/database.py`
+
 ## 2026-04-19 — (seasons-schema-fix)
 **What changed:** Removed the `name` column from the seasons DataFrame
 projection in `scrape_draft_class`. Also strip position suffixes like
