@@ -4,8 +4,9 @@ NHL Prospect Prediction — Streamlit frontend.
 Run with:
     streamlit run app.py
 
-Pick up to two prospects from the sidebar to render side-by-side
-scouting cards modeled on the Andy & Rono prospect-card template.
+Board view: sortable table of prospects on the left, detail card on the right
+when a row is selected. Sidebar filters the board by draft year, position,
+and free-text name search.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from src.data.database import (
     load_predictions,
     load_seasons,
 )
+from src.data.images import headshot_url, nhl_id_for
 from src.models.features import build_feature_matrix
 from src.comparables.similarity import build_comparable_index
 
@@ -30,7 +32,7 @@ from src.comparables.similarity import build_comparable_index
 
 PLACEHOLDER = "—"
 
-# Status taxonomy — matches the legend at the bottom of the template
+# Status taxonomy — matches the legend at the bottom of the board
 STATUS_STYLES = {
     "Superstar":             {"color": "#7C1E3A", "icon": "★"},
     "Star Producer":         {"color": "#C0392B", "icon": "★"},
@@ -42,7 +44,7 @@ STATUS_STYLES = {
     "Developing":            {"color": "#1F618D", "icon": "◐"},
 }
 
-# Accent color for the top bar of each card — mapped from status
+# Accent color for the top bar of the detail card — mapped from status
 CARD_ACCENTS = {
     "Superstar":            "#B22222",
     "Star Producer":        "#C0392B",
@@ -56,9 +58,9 @@ CARD_ACCENTS = {
 
 # Outcome icon for comparables rows (maps to the legend)
 OUTCOME_ICONS = {
-    "Elite (Star NHLer)":   ("★", "#D4AC0D"),   # gold star
-    "NHLer (Role Player)":  ("◐", "#27AE60"),   # green half-circle
-    "Did Not Reach NHL":    ("—", "#7B7D7D"),   # grey dash
+    "Elite (Star NHLer)":   ("★", "#D4AC0D"),
+    "NHLer (Role Player)":  ("◐", "#27AE60"),
+    "Did Not Reach NHL":    ("—", "#7B7D7D"),
     "Unknown":              ("?", "#95A5A6"),
 }
 
@@ -67,7 +69,7 @@ FLAG_EMOJI = {
     "CAN": "🇨🇦", "USA": "🇺🇸", "SWE": "🇸🇪", "FIN": "🇫🇮",
     "RUS": "🇷🇺", "CZE": "🇨🇿", "SVK": "🇸🇰", "GER": "🇩🇪",
     "SUI": "🇨🇭", "DEN": "🇩🇰", "BLR": "🇧🇾", "LAT": "🇱🇻",
-    "NOR": "🇳🇴", "AUT": "🇦🇹", "FRA": "🇫🇷",
+    "NOR": "🇳🇴", "AUT": "🇦🇹", "FRA": "🇫🇷", "CZ": "🇨🇿",
 }
 
 
@@ -114,42 +116,41 @@ def get_feature_row(_players: pd.DataFrame, _seasons: pd.DataFrame,
 
 # ── derivations ──────────────────────────────────────────────────────────────
 
-def calc_age(dob: str) -> float | None:
+def calc_age(dob) -> float | None:
+    if not dob or pd.isna(dob):
+        return None
     try:
-        b = datetime.strptime(dob, "%Y-%m-%d").date()
-        d = date.today()
-        yrs = (d - b).days / 365.25
-        return round(yrs, 1)
+        b = datetime.strptime(str(dob), "%Y-%m-%d").date()
+        return round((date.today() - b).days / 365.25, 1)
     except Exception:
         return None
 
 
-def height_display(cm: float | None) -> str:
+def height_display(cm) -> str:
     if not cm or pd.isna(cm):
         return PLACEHOLDER
-    inches_total = round(cm / 2.54)
+    inches_total = round(float(cm) / 2.54)
     ft, inch = divmod(inches_total, 12)
     return f"{ft}'{inch}\""
 
 
-def weight_display(kg: float | None) -> str:
+def weight_display(kg) -> str:
     if not kg or pd.isna(kg):
         return PLACEHOLDER
-    return f"{round(kg * 2.20462)}"
+    return f"{round(float(kg) * 2.20462)}"
 
 
-def format_born(dob: str | None) -> str:
-    if not dob:
+def format_born(dob) -> str:
+    if not dob or pd.isna(dob):
         return PLACEHOLDER
     try:
-        return datetime.strptime(dob, "%Y-%m-%d").strftime("%b %d, %Y")
+        return datetime.strptime(str(dob), "%Y-%m-%d").strftime("%b %d, %Y")
     except Exception:
-        return dob
+        return str(dob)
 
 
 def status_for(player_id: str, outcomes: pd.DataFrame,
                predictions: pd.DataFrame) -> str:
-    """Pick a status bucket from realized career first, else from the model."""
     out = outcomes[outcomes["player_id"] == player_id]
     if not out.empty:
         o = out.iloc[0]
@@ -183,29 +184,23 @@ def status_for(player_id: str, outcomes: pd.DataFrame,
 
 def get_dev_stages(seasons_for_player: pd.DataFrame,
                    draft_year: int | None) -> pd.DataFrame:
-    """
-    Return a DataFrame indexed by stage label (D-1..D3) with season year
-    and NHLe points-per-82-game value for the bar chart.
-    Uses `draft_label` if present, else derives from `season` & `draft_year`.
-    """
     df = seasons_for_player.copy()
     if df.empty:
         return df
 
     if "draft_label" not in df.columns or df["draft_label"].isna().all():
         if draft_year:
-            yr = df["season"].str.split("-").str[0].astype(int)
+            yr = df["season"].astype(str).str.split("-").str[0].astype(int)
             df["draft_label"] = (yr - int(draft_year)).apply(
                 lambda d: f"D{int(d):+d}" if pd.notna(d) else None
             )
         else:
             df["draft_label"] = None
 
-    df["season_yr"] = df["season"].str.split("-").str[0].astype(int) + 1
+    df["season_yr"] = df["season"].astype(str).str.split("-").str[0].astype(int) + 1
     if df["draft_label"].isna().all():
         return pd.DataFrame(columns=["draft_label", "season_yr", "nhle_ppg", "nhle82"])
 
-    # One row per stage (max NHLe PPG if multiple leagues that season)
     agg = (
         df.groupby("draft_label", dropna=True)
           .agg(season_yr=("season_yr", "max"),
@@ -219,14 +214,6 @@ def get_dev_stages(seasons_for_player: pd.DataFrame,
 def get_stage_probs(seasons_for_player: pd.DataFrame,
                     outcomes_row: pd.Series | None,
                     predictions_row: pd.Series | None) -> dict[str, dict]:
-    """
-    Build {stage: {"star": prob_or_None, "nhler": prob_or_None}} for D0..D3.
-    - Realized historical career → 0.99 / 0.01 based on actual outcome at every
-      stage the player actually skated.
-    - Current prospect → single model probability at their most-recent stage
-      present in the seasons data.
-    - All other stages → None (rendered as placeholder).
-    """
     stages = ["D+0", "D+1", "D+2", "D+3"]
     result = {s: {"star": None, "nhler": None} for s in stages}
 
@@ -247,14 +234,9 @@ def get_stage_probs(seasons_for_player: pd.DataFrame,
         return result
 
     if predictions_row is not None:
-        # Attach model prob to the latest stage we have data for, else D+0
         latest = None
-        ordered = [s for s in stages if s in seasons_stages]
-        if ordered:
-            ordered.sort()
-            latest = ordered[-1]
-        else:
-            latest = "D+0"
+        ordered = sorted(s for s in stages if s in seasons_stages)
+        latest = ordered[-1] if ordered else "D+0"
 
         star = predictions_row.get("star_probability")
         nhler = predictions_row.get("nhler_probability")
@@ -266,7 +248,7 @@ def get_stage_probs(seasons_for_player: pd.DataFrame,
     return result
 
 
-# ── rendering ────────────────────────────────────────────────────────────────
+# ── chart helpers (unchanged) ────────────────────────────────────────────────
 
 def nhle_bar_chart(stages_df: pd.DataFrame, accent: str) -> go.Figure:
     """Horizontal bar chart of NHLe-82 by development stage (D-1..D+3)."""
@@ -297,7 +279,6 @@ def nhle_bar_chart(stages_df: pd.DataFrame, accent: str) -> go.Figure:
         textfont=dict(color="white", size=13),
         hovertemplate="%{y}: %{x} NHLe pts/82<extra></extra>",
     )
-    # Year annotations on left
     for i, r in df.iterrows():
         fig.add_annotation(
             x=0, y=r["label"],
@@ -328,7 +309,6 @@ def prob_row_html(probs: dict[str, dict], kind: str, title: str) -> str:
         else:
             pct = int(round(val * 100))
             txt = f"{pct}%"
-            # Blue ramp: light → deep based on value
             if pct >= 70:
                 bg, fg, border = "#1F4E79", "white", "#1F4E79"
             elif pct >= 40:
@@ -377,84 +357,223 @@ def comps_table_html(title: str, comps: pd.DataFrame) -> str:
         f'  <div style="background:#1B2631;color:white;padding:6px 10px;font-weight:700;font-size:12px;">{title}</div>'
         f'  <table style="width:100%;border-collapse:collapse;font-size:12px;">'
         f'    {"".join(rows_html)}'
-        f'  </table>'
+        f'</table>'
         f'</div>'
     )
 
 
-def render_card(player_row: pd.Series, seasons_sub: pd.DataFrame,
-                outcome_row: pd.Series | None, pred_row: pd.Series | None,
-                status: str, dy_comps: pd.DataFrame, full_comps: pd.DataFrame):
-    accent = CARD_ACCENTS.get(status, "#1F618D")
-    style = STATUS_STYLES.get(status, STATUS_STYLES["Developing"])
+# ── board DataFrame ──────────────────────────────────────────────────────────
 
-    # ── Accent bar ───────────────────────────────────────────────
+def _status_icon_label(status: str) -> str:
+    s = STATUS_STYLES.get(status, STATUS_STYLES["Developing"])
+    return f"{s['icon']} {status}"
+
+
+def _draft_pick_display(row) -> str:
+    dy = row.get("draft_year")
+    rnd = row.get("draft_round")
+    pick = row.get("draft_pick")
+    if pd.isna(dy) or dy in (None, 0):
+        return PLACEHOLDER
+    parts = [str(int(dy))]
+    if pd.notna(rnd) and rnd not in (None, 0):
+        parts.append(f"R{int(rnd)}")
+    if pd.notna(pick) and pick not in (None, 0):
+        parts.append(f"#{int(pick)}")
+    return " ".join(parts)
+
+
+def _best_nhle_ppg(player_id: str, seasons: pd.DataFrame) -> float:
+    sub = seasons[seasons["player_id"] == player_id]
+    if sub.empty or "nhle_ppg" not in sub.columns:
+        return 0.0
+    best = sub["nhle_ppg"].max()
+    return float(best) if pd.notna(best) else 0.0
+
+
+@st.cache_data(show_spinner="Building prospect board…")
+def build_board(_players: pd.DataFrame, _seasons: pd.DataFrame,
+                _outcomes: pd.DataFrame, _predictions: pd.DataFrame) -> pd.DataFrame:
+    """One row per player — the sortable board view."""
+    if _players.empty:
+        return pd.DataFrame()
+
+    df = _players[["player_id", "name", "position", "nationality", "dob",
+                    "draft_year", "draft_round", "draft_pick", "draft_team"]].copy()
+
+    # Join predictions (most recent model output per player)
+    if not _predictions.empty:
+        pred_cols = ["player_id", "nhler_probability", "star_probability",
+                     "projected_career_pts", "rank_score"]
+        pred_cols = [c for c in pred_cols if c in _predictions.columns]
+        df = df.merge(_predictions[pred_cols], on="player_id", how="left")
+    for col in ("nhler_probability", "star_probability",
+                "projected_career_pts", "rank_score"):
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    # Headshot URL via NHL ID map
+    df["headshot_url"] = df["player_id"].astype(str).apply(headshot_url)
+
+    # Best NHLe across career
+    df["nhle_ppg"] = df["player_id"].apply(lambda pid: _best_nhle_ppg(pid, _seasons))
+
+    # Status bucket
+    df["status"] = df["player_id"].apply(
+        lambda pid: status_for(pid, _outcomes, _predictions)
+    )
+
+    # Display helpers
+    df["draft_display"] = df.apply(_draft_pick_display, axis=1)
+    df["status_display"] = df["status"].apply(_status_icon_label)
+    df["nhler_pct"] = (df["nhler_probability"] * 100).round().astype("Int64")
+    df["star_pct"] = (df["star_probability"] * 100).round().astype("Int64")
+    df["proj_pts"] = df["projected_career_pts"].round().astype("Int64")
+
+    # Rank: prefer model rank_score; fall back to nhler_probability desc
+    sort_key = "rank_score" if df["rank_score"].notna().any() else "nhler_probability"
+    df = df.sort_values(
+        [sort_key, "nhler_probability", "star_probability"],
+        ascending=[False, False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+    df["rank"] = df.index + 1
+
+    return df
+
+
+def filter_board(board: pd.DataFrame, *,
+                 draft_year: str | None = None,
+                 positions: list[str] | None = None,
+                 search: str | None = None,
+                 include_settled: bool = False) -> pd.DataFrame:
+    """Apply sidebar filters to the board DataFrame."""
+    df = board.copy()
+
+    # By default drop veterans whose careers are settled via nhl_outcomes
+    # (so the "board" reads like a scouting board, not a roster ledger).
+    # Users can tick a box to include them.
+    if not include_settled:
+        active_statuses = {"Developing", "100 Gamer", "Fringe Star",
+                           "Star Producer", "Superstar",
+                           "Bust", "Average Producer",
+                           "Replacement Producer"}
+        # Heuristic: if a player's draft_year is >= 2022 OR they lack one,
+        # treat them as a current prospect.
+        if "draft_year" in df.columns:
+            mask = (df["draft_year"] >= 2022) | df["draft_year"].isna()
+            df = df[mask]
+
+    if draft_year and draft_year != "All":
+        try:
+            df = df[df["draft_year"] == int(draft_year)]
+        except Exception:
+            pass
+
+    if positions:
+        df = df[df["position"].isin(positions)]
+
+    if search:
+        q = search.strip().lower()
+        if q:
+            df = df[df["name"].astype(str).str.lower().str.contains(q, na=False)]
+
+    df = df.reset_index(drop=True)
+    df["rank"] = df.index + 1
+    return df
+
+
+# ── detail drawer (composable card pieces) ───────────────────────────────────
+
+def render_card_header(player_row: pd.Series, status: str, accent: str):
+    style = STATUS_STYLES.get(status, STATUS_STYLES["Developing"])
+    flag = FLAG_EMOJI.get((player_row.get("nationality") or "").upper(), "🏒")
+    name = player_row.get("name", "Unknown")
+    pos = (player_row.get("position") or "").upper()[:1] or "—"
+
+    # Accent bar
     st.markdown(
         f'<div style="height:6px;background:{accent};border-radius:2px;margin-bottom:8px;"></div>',
         unsafe_allow_html=True,
     )
 
-    # ── Header: name + flag + status + logo placeholder ─────────
-    flag = FLAG_EMOJI.get((player_row.get("nationality") or "").upper(), "🏒")
-    name = player_row.get("name", "Unknown")
-    pos = (player_row.get("position") or "").upper()[:1] or "—"
-
-    header_col1, header_col2 = st.columns([3, 1])
-    with header_col1:
+    headshot = headshot_url(str(player_row.get("player_id", "")))
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        st.image(headshot, width=90)
+    with c2:
         st.markdown(
             f'<div style="font-size:22px;font-weight:800;color:#1B2631;line-height:1.1;">{name}</div>'
-            f'<div style="margin-top:2px;font-size:13px;color:#566573;">'
-            f'{flag} <span style="color:{style["color"]};font-weight:700;">{status}</span>'
+            f'<div style="margin-top:4px;font-size:13px;color:#566573;">'
+            f'{flag} <span style="color:{style["color"]};font-weight:700;">'
+            f'{style["icon"]} {status}</span>'
             f' &nbsp;|&nbsp; <b>{pos}</b></div>',
             unsafe_allow_html=True,
         )
-    with header_col2:
-        st.markdown(
-            '<div style="text-align:right;font-size:11px;color:#909497;font-style:italic;">'
-            'drafted by</div>'
-            '<div style="text-align:right;font-size:28px;">🏒</div>',
-            unsafe_allow_html=True,
-        )
 
-    # ── Bio stats ────────────────────────────────────────────────
+
+def render_card_bio(player_row: pd.Series, seasons_sub: pd.DataFrame,
+                    outcome_row: pd.Series | None):
     gp = int(seasons_sub["gp"].sum()) if not seasons_sub.empty else 0
     assists = int(seasons_sub["assists"].sum()) if not seasons_sub.empty else 0
     points = int(seasons_sub["points"].sum()) if not seasons_sub.empty else 0
     ppg = round(points / gp, 2) if gp else 0
 
-    dy = int(outcome_row["draft_year"]) if outcome_row is not None and pd.notna(outcome_row.get("draft_year")) else PLACEHOLDER
-    rnd = int(outcome_row["draft_round"]) if outcome_row is not None and pd.notna(outcome_row.get("draft_round")) else PLACEHOLDER
-    pick = int(outcome_row["draft_pick"]) if outcome_row is not None and pd.notna(outcome_row.get("draft_pick")) else PLACEHOLDER
+    def _iget(field):
+        # Prefer players-table value; fall back to outcomes if present
+        v = player_row.get(field)
+        if (v is None or pd.isna(v)) and outcome_row is not None:
+            v = outcome_row.get(field)
+        return v if pd.notna(v) and v not in (None, 0) else None
+
+    dy_val = _iget("draft_year")
+    rnd_val = _iget("draft_round")
+    pick_val = _iget("draft_pick")
+    team_val = player_row.get("draft_team")
+
+    dy = int(dy_val) if dy_val else PLACEHOLDER
+    rnd = int(rnd_val) if rnd_val else PLACEHOLDER
+    pick = int(pick_val) if pick_val else PLACEHOLDER
+    team = team_val if team_val and pd.notna(team_val) else PLACEHOLDER
 
     bio = (
-        f'<div style="font-size:12px;color:#2C3E50;line-height:1.8;margin-top:6px;">'
+        f'<div style="font-size:12px;color:#2C3E50;line-height:1.8;margin-top:10px;">'
         f'<b>GP:</b> {gp} | <b>A:</b> {assists} | <b>Pts:</b> {points} | <b>PPG:</b> {ppg}<br>'
         f'<b>Born:</b> {format_born(player_row.get("dob"))} | '
         f'<b>Age:</b> {calc_age(player_row.get("dob")) or PLACEHOLDER}<br>'
         f'<b>H:</b> {height_display(player_row.get("height_cm"))} | '
         f'<b>W:</b> {weight_display(player_row.get("weight_kg"))} | '
         f'<b>Shoots:</b> {player_row.get("shoots") or PLACEHOLDER}<br>'
-        f'<b>DY:</b> {dy} | <b>Round:</b> {rnd} | <b>Pick:</b> {pick}'
+        f'<b>DY:</b> {dy} | <b>Round:</b> {rnd} | <b>Pick:</b> {pick} | <b>Team:</b> {team}'
         f'</div>'
     )
     st.markdown(bio, unsafe_allow_html=True)
 
-    # ── NHLe bar chart ───────────────────────────────────────────
+
+def render_card_charts(player_row: pd.Series, seasons_sub: pd.DataFrame,
+                        outcome_row: pd.Series | None,
+                        pred_row: pd.Series | None, accent: str):
     st.markdown(
         '<div style="margin-top:14px;font-size:12px;font-weight:700;color:#1B2631;">NHLe (pts / 82 games)</div>',
         unsafe_allow_html=True,
     )
-    draft_year = int(outcome_row["draft_year"]) if outcome_row is not None and pd.notna(outcome_row.get("draft_year")) else None
+    draft_year = None
+    if outcome_row is not None and pd.notna(outcome_row.get("draft_year")):
+        draft_year = int(outcome_row["draft_year"])
+    elif pd.notna(player_row.get("draft_year")):
+        draft_year = int(player_row["draft_year"])
+
     stages_df = get_dev_stages(seasons_sub, draft_year)
     if not stages_df.empty:
-        st.plotly_chart(nhle_bar_chart(stages_df, accent),
-                        use_container_width=True,
-                        config={"displayModeBar": False},
-                        key=f"nhle_{player_row['player_id']}")
+        st.plotly_chart(
+            nhle_bar_chart(stages_df, accent),
+            use_container_width=True,
+            config={"displayModeBar": False},
+            key=f"nhle_{player_row['player_id']}",
+        )
     else:
         st.caption("No season data available.")
 
-    # ── Probability rows ─────────────────────────────────────────
     probs = get_stage_probs(seasons_sub, outcome_row, pred_row)
     c1, c2 = st.columns(2)
     with c1:
@@ -464,12 +583,55 @@ def render_card(player_row: pd.Series, seasons_sub: pd.DataFrame,
         st.markdown(prob_row_html(probs, "nhler", "NHLer Probabilities"),
                     unsafe_allow_html=True)
 
-    # ── Comparables ──────────────────────────────────────────────
+
+def render_card_comps(dy_comps: pd.DataFrame, full_comps: pd.DataFrame):
     d1, d2 = st.columns(2)
     with d1:
         st.markdown(comps_table_html("DY Comps", dy_comps), unsafe_allow_html=True)
     with d2:
         st.markdown(comps_table_html("Full Comps", full_comps), unsafe_allow_html=True)
+
+
+def render_drawer(player_id: str, players: pd.DataFrame, seasons: pd.DataFrame,
+                  outcomes: pd.DataFrame, predictions: pd.DataFrame,
+                  comp_index):
+    """Render the full detail card for a single selected player."""
+    match = players[players["player_id"] == player_id]
+    if match.empty:
+        st.info("Selected player not found.")
+        return
+    player_row = match.iloc[0]
+    seasons_sub = seasons[seasons["player_id"] == player_id].copy()
+
+    out_match = outcomes[outcomes["player_id"] == player_id] if not outcomes.empty else pd.DataFrame()
+    outcome_row = out_match.iloc[0] if not out_match.empty else None
+
+    pred_match = predictions[predictions["player_id"] == player_id] if not predictions.empty else pd.DataFrame()
+    pred_row = pred_match.iloc[0] if not pred_match.empty else None
+
+    status = status_for(player_id, outcomes, predictions)
+    accent = CARD_ACCENTS.get(status, "#1F618D")
+
+    # Comparables (optional — only if index is built)
+    dy_comps = full_comps = pd.DataFrame()
+    if comp_index is not None:
+        feat_row = get_feature_row(players, seasons, outcomes, player_id)
+        if feat_row is not None:
+            full_comps = comp_index.find_comparables(feat_row, n=5,
+                                                     same_draft_year_only=False)
+            target_dy = player_row.get("draft_year")
+            if (target_dy is None or pd.isna(target_dy)) and outcome_row is not None:
+                target_dy = outcome_row.get("draft_year")
+            if pd.notna(target_dy):
+                feat_row_dy = feat_row.copy()
+                feat_row_dy["draft_year"] = target_dy
+                dy_comps = comp_index.find_comparables(feat_row_dy, n=5,
+                                                       same_draft_year_only=True)
+
+    render_card_header(player_row, status, accent)
+    render_card_bio(player_row, seasons_sub, outcome_row)
+    render_card_charts(player_row, seasons_sub, outcome_row, pred_row, accent)
+    render_card_comps(dy_comps, full_comps)
 
 
 def render_legend():
@@ -490,98 +652,117 @@ def render_legend():
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+BOARD_COLS_VISIBLE = [
+    "rank", "headshot_url", "name", "position", "draft_display",
+    "nhler_pct", "star_pct", "proj_pts", "nhle_ppg", "status_display",
+]
+
+
 def main():
     st.set_page_config(
-        page_title="NHL Prospect Cards",
+        page_title="Prospect Board",
         page_icon="🏒",
         layout="wide",
     )
-    st.title("🏒 NHL Prospect Cards")
-    st.caption("Pick up to two prospects to compare.")
+    st.title("🏒 NHL Prospect Board")
+    st.caption("Click a row to view the full scouting card on the right.")
 
     players, seasons, outcomes, predictions = load_all()
-
     if players.empty:
         st.error("No player data found. Run `python main.py collect` first.")
         return
 
-    # Sidebar filters & picker
-    st.sidebar.header("Pick prospects")
+    # ── Sidebar filters ──────────────────────────────────────────
+    st.sidebar.header("Filters")
 
-    draft_years = sorted(
-        [int(y) for y in outcomes["draft_year"].dropna().unique()]
-    ) if not outcomes.empty else []
-    years_opt = ["All"] + [str(y) for y in draft_years]
-    year_filter = st.sidebar.selectbox("Draft year filter", years_opt, index=0)
-
-    positions = sorted(p for p in players["position"].dropna().unique() if p)
-    pos_filter = st.sidebar.multiselect("Position", positions, default=[])
-
-    leagues = sorted(
-        l for l in seasons["league"].dropna().unique() if l
-    ) if not seasons.empty else []
-    league_filter = st.sidebar.multiselect(
-        "League", leagues, default=[],
-        help="Only show prospects who played in the selected league(s).",
+    all_years = sorted(
+        {int(y) for y in players["draft_year"].dropna().unique() if y >= 2022},
+        reverse=True,
     )
+    years_opt = ["All"] + [str(y) for y in all_years]
+    year_filter = st.sidebar.selectbox("Draft year", years_opt, index=0)
 
-    # Apply filters to pick list
-    pick_df = players.copy()
-    if pos_filter:
-        pick_df = pick_df[pick_df["position"].isin(pos_filter)]
-    if year_filter != "All" and not outcomes.empty:
-        ids_in_year = outcomes[outcomes["draft_year"] == int(year_filter)]["player_id"]
-        pick_df = pick_df[pick_df["player_id"].isin(ids_in_year)]
-    if league_filter:
-        ids_in_league = seasons[seasons["league"].isin(league_filter)]["player_id"].unique()
-        pick_df = pick_df[pick_df["player_id"].isin(ids_in_league)]
+    all_positions = [
+        p for p in ["F", "D", "G"] if p in set(players["position"].dropna())
+    ]
+    pos_filter = st.sidebar.multiselect("Position", all_positions, default=[])
 
-    pick_df = pick_df.sort_values("name")
-    name_to_id = dict(zip(pick_df["name"], pick_df["player_id"]))
-    name_opts = ["—"] + list(pick_df["name"])
+    search = st.sidebar.text_input("Search by name", "")
 
-    player_a_name = st.sidebar.selectbox("Player A", name_opts, index=min(1, len(name_opts) - 1))
-    player_b_name = st.sidebar.selectbox("Player B (optional)", name_opts, index=0)
+    include_settled = st.sidebar.checkbox(
+        "Include veterans with settled careers", value=False,
+        help="Off by default — board focuses on current draft-eligible prospects.",
+    )
 
     comp_index = get_comp_index(players, seasons, outcomes)
     if comp_index is None:
-        st.info("Comparables index unavailable (no historical outcomes loaded). "
-                "Run `python main.py train` to enable comps.")
+        st.sidebar.caption("⚠️ Comparables unavailable (no trained model)")
 
-    chosen_ids = [name_to_id.get(n) for n in [player_a_name, player_b_name] if n and n != "—"]
-    if not chosen_ids:
-        st.warning("Pick a player from the sidebar to render a card.")
-        return
+    # ── Build + filter board ─────────────────────────────────────
+    board = build_board(players, seasons, outcomes, predictions)
+    view = filter_board(
+        board,
+        draft_year=year_filter,
+        positions=pos_filter or None,
+        search=search or None,
+        include_settled=include_settled,
+    )
 
-    cols = st.columns(len(chosen_ids))
-    for col, pid in zip(cols, chosen_ids):
-        with col:
-            player_row = players[players["player_id"] == pid].iloc[0]
-            seasons_sub = seasons[seasons["player_id"] == pid].copy()
+    # Summary chip
+    st.markdown(
+        f'<div style="margin:4px 0 12px 0;color:#566573;font-size:13px;">'
+        f'Showing <b>{len(view)}</b> prospects · '
+        f'Click any row to open the scouting card.'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-            out_match = outcomes[outcomes["player_id"] == pid] if not outcomes.empty else pd.DataFrame()
-            outcome_row = out_match.iloc[0] if not out_match.empty else None
+    # ── Two-column layout: board + detail drawer ─────────────────
+    board_col, drawer_col = st.columns([3, 2], gap="large")
 
-            pred_match = predictions[predictions["player_id"] == pid] if not predictions.empty else pd.DataFrame()
-            pred_row = pred_match.iloc[0] if not pred_match.empty else None
+    with board_col:
+        if view.empty:
+            st.info("No prospects match the current filters.")
+            selected_pid = None
+        else:
+            event = st.dataframe(
+                view[BOARD_COLS_VISIBLE],
+                hide_index=True,
+                use_container_width=True,
+                height=min(650, 60 + 36 * min(len(view), 18)),
+                selection_mode="single-row",
+                on_select="rerun",
+                column_config={
+                    "rank":          st.column_config.NumberColumn("#", width="small"),
+                    "headshot_url":  st.column_config.ImageColumn(" ", width="small"),
+                    "name":          st.column_config.TextColumn("Name", width="medium"),
+                    "position":      st.column_config.TextColumn("Pos", width="small"),
+                    "draft_display": st.column_config.TextColumn("Draft", width="small"),
+                    "nhler_pct":     st.column_config.ProgressColumn(
+                        "NHLer %", format="%d%%", min_value=0, max_value=100),
+                    "star_pct":      st.column_config.ProgressColumn(
+                        "Star %", format="%d%%", min_value=0, max_value=100),
+                    "proj_pts":      st.column_config.NumberColumn("Proj Pts", width="small"),
+                    "nhle_ppg":      st.column_config.NumberColumn(
+                        "NHLe", format="%.2f", width="small"),
+                    "status_display":st.column_config.TextColumn("Status", width="medium"),
+                },
+                key="board_table",
+            )
+            sel = event.selection.rows if event and event.selection else []
+            if sel:
+                selected_pid = view.iloc[sel[0]]["player_id"]
+            else:
+                selected_pid = view.iloc[0]["player_id"]  # default to #1
 
-            status = status_for(pid, outcomes, predictions)
-
-            dy_comps = pd.DataFrame()
-            full_comps = pd.DataFrame()
-            if comp_index is not None:
-                feat_row = get_feature_row(players, seasons, outcomes, pid)
-                if feat_row is not None:
-                    full_comps = comp_index.find_comparables(feat_row, n=5,
-                                                              same_draft_year_only=False)
-                    if outcome_row is not None and pd.notna(outcome_row.get("draft_year")):
-                        feat_row_dy = feat_row.copy()
-                        feat_row_dy["draft_year"] = outcome_row["draft_year"]
-                        dy_comps = comp_index.find_comparables(feat_row_dy, n=5,
-                                                                same_draft_year_only=True)
-
-            render_card(player_row, seasons_sub, outcome_row, pred_row,
-                        status, dy_comps, full_comps)
+    with drawer_col:
+        if view.empty:
+            pass
+        elif selected_pid:
+            render_drawer(selected_pid, players, seasons, outcomes,
+                          predictions, comp_index)
+        else:
+            st.info("Click a row on the left to open the scouting card.")
 
     render_legend()
 
