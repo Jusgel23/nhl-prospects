@@ -3,6 +3,17 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-19 — (seasons-schema-fix)
+**What changed:** Removed the `name` column from the seasons DataFrame
+projection in `scrape_draft_class`. Also strip position suffixes like
+"(C/LW)" from player names in `_clean_stats_df` so both fresh scrapes
+and cache-loaded rows produce clean names.
+**Why:** `upsert_seasons` crashed after 155 players were stored because
+the DataFrame included a `name` column that doesn't exist in the
+`seasons` table schema. The suffix cleanup is a related data-quality
+fix for names extracted from EP's stats tables.
+**Files:** `src/data/scrapers/eliteprospects.py`
+
 ## 2026-04-19 — (scrape-cache)
 **What changed:** EliteProspects scraper now persists each league-season
 stats table to `data/raw/league_stats/{league}_{season}.csv` and each

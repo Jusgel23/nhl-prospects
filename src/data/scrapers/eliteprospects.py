@@ -219,7 +219,8 @@ def scrape_draft_class(seasons: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
                 if df.empty:
                     continue
 
-                all_seasons.append(df[["player_id", "name", "season", "league",
+                # Seasons table has no `name` column — name lives in `players`
+                all_seasons.append(df[["player_id", "season", "league",
                                        "team", "gp", "goals", "assists", "points",
                                        "pim", "plus_minus", "pp_goals", "pp_assists",
                                        "gp_rate", "ppg"]])
@@ -315,4 +316,14 @@ def _clean_stats_df(df: pd.DataFrame) -> pd.DataFrame:
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # Strip position suffix that EP embeds in the stats-table name,
+    # e.g. "David Goyette(C/LW)" -> "David Goyette"
+    if "name" in df.columns:
+        df["name"] = (
+            df["name"].astype(str)
+            .str.replace(r"\s*\([^)]*\)\s*$", "", regex=True)
+            .str.strip()
+        )
+
     return df
