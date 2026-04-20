@@ -168,8 +168,12 @@ def _engineer(df: pd.DataFrame) -> pd.DataFrame:
     gp = df.get("gp", pd.Series(1)).replace(0, 1)
     df["pim_per_game"] = (df.get("pim", pd.Series(0)) / gp).fillna(0).round(3)
 
-    # GP rate (proxy for team usage / health) — filled with 1.0 if unknown
-    df["gp_rate"] = pd.to_numeric(df.get("gp_rate"), errors="coerce").fillna(1.0)
+    # GP rate (proxy for team usage / health) — filled with 1.0 if unknown.
+    # _pivot_seasons drops this column, so the pivoted df may lack it entirely.
+    if "gp_rate" in df.columns:
+        df["gp_rate"] = pd.to_numeric(df["gp_rate"], errors="coerce").fillna(1.0)
+    else:
+        df["gp_rate"] = 1.0
 
     # League encoding
     df["league_enc"] = df.get("league", pd.Series("OTHER")).apply(

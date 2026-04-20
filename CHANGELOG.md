@@ -3,6 +3,16 @@
 A running narrative of what changed in this repo, newest entries at the top.
 See `git log` for the full technical history.
 
+## 2026-04-19 — (gp_rate-guard)
+**What changed:** `_engineer` in `src/models/features.py` now checks
+whether `gp_rate` is present in the DataFrame before calling
+`pd.to_numeric`, defaulting to 1.0 if absent.
+**Why:** `_pivot_seasons` aggregation doesn't include `gp_rate`, so the
+pivoted DataFrame lacks that column. `df.get("gp_rate")` returned None,
+and `pd.to_numeric(None).fillna()` crashed. Broke both `train` and the
+Streamlit comparables-index build.
+**Files:** `src/models/features.py`
+
 ## 2026-04-19 — (defensive-upsert)
 **What changed:** `_upsert_method` now queries the target table's schema
 via `PRAGMA table_info` and filters the insert to only the columns that
