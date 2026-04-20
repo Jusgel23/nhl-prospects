@@ -6,6 +6,55 @@ Items are grouped by effort and tagged by theme: **[data]**, **[model]**,
 
 ---
 
+## Planned probability-calibration tuning pass **[model]**
+
+**Problem:** The current board's top-5 prospects all hit 100% NHLer and
+70-99% Star probability. That's too generous — historically only ~30-40%
+of #1 overall picks become "stars" by the 200-GP / 0.40-PPG definition,
+so the top of the distribution is compressed at the ceiling. The
+predictions *rank* correctly (Celebrini #1, Parekh high among D, etc.)
+but the absolute magnitudes read as overconfident.
+
+**Root causes** (from `bce1baa`, `6066386`, and training on ~330 labeled
+rows):
+1. Thin training set pushes the model toward extremes.
+2. `scale_pos_weight = neg/pos` (≈5×) aggressively boosts positive-class
+   outputs; calibration only partially undoes it on small samples.
+3. Monotonic `+1` constraints on every NHLe-variant feature cause elite
+   prospects to pin at prob = 1.0 with no headroom.
+
+**When to tune:** After the full HR career backfill finishes and the
+labeled training set grows from ~330 to the ~2,000-5,000 range. More
+data naturally regularizes the probability spread; tuning now would
+just produce different noise.
+
+**Tuning levers, in order of impact:**
+
+| Lever | File | Effect | Effort |
+|---|---|---|---|
+| `scale_pos_weight = sqrt(neg/pos)` instead of `neg/pos` | `src/models/predictor.py:207` (the `_pos_weight` helper) | Less aggressive positive-class push → more realistic probabilities | 1 line |
+| Remove monotonic constraint on `peak_nhle_ppg` (keep on `nhle_ppg` only) | `src/models/predictor.py:27` (the `_MONOTONE_CONSTRAINTS_BY_COL` dict) | Stops prospects with one freak season from pinning at 100% | 1 line |
+| Widen isotonic calibration; `cv=10` on nhler_prob | `src/models/predictor.py:234` (the `_fit_calibrated_clf` helper) | Probabilities hew closer to historical base rates | 5 min |
+| Add Bayesian shrinkage toward class base rate | `src/models/predictor.py` — new wrapper around `predict_proba` | Shrinks predictions toward 21% NHLer / 5% star when data is thin | ~30 LOC |
+| Display "percentile within draft class" instead of raw prob on the board | `app.py` — new column in `build_board()` | "Top 1%" reads more honestly than "99%" for scouting | ~10 LOC |
+
+**Recommended sequence:**
+1. Finish HR backfill + retrain (no code changes) → observe new spread
+2. If still compressed: apply levers 1 + 2 together (5 min)
+3. If probabilities still feel wrong: add lever 5 (percentile view) —
+   scouts intuit percentile rankings better than absolute probability
+4. Defer levers 3 + 4 unless a backtest page reveals systemic miscalibration
+
+**Verification:**
+- Historical backtest page (separate FE item) — replay 2015 draft class,
+  check predicted top-10 against known NHL outcomes. If calibration is
+  working, Connor McDavid should sit near the observed ~70% star-prob
+  for #1 picks historically, not 99%.
+- Calibration plot: predicted probability buckets (0-10%, 10-20%, …)
+  should match observed hit rate within each bucket.
+
+---
+
 ## Quick wins (1–2 hrs each)
 
 ### Add playoff statistics **[data] [model]**
